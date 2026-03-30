@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="80" fill="#0D1117"/>
+  <!-- Outer rings -->
+  <circle cx="256" cy="256" r="210" fill="none" stroke="#1D9E75" stroke-width="6" opacity="0.3"/>
+  <circle cx="256" cy="256" r="160" fill="none" stroke="#1D9E75" stroke-width="6" opacity="0.6"/>
+  <circle cx="256" cy="256" r="100" fill="none" stroke="#1D9E75" stroke-width="6" opacity="1"/>
+  <!-- Crosshair lines -->
+  <line x1="256" y1="30" x2="256" y2="155" stroke="#1D9E75" stroke-width="8" stroke-linecap="round"/>
+  <line x1="256" y1="357" x2="256" y2="482" stroke="#1D9E75" stroke-width="8" stroke-linecap="round"/>
+  <line x1="30" y1="256" x2="155" y2="256" stroke="#1D9E75" stroke-width="8" stroke-linecap="round"/>
+  <line x1="357" y1="256" x2="482" y2="256" stroke="#1D9E75" stroke-width="8" stroke-linecap="round"/>
+  <!-- Corner brackets -->
+  <path d="M80,80 L80,130 M80,80 L130,80" stroke="#1D9E75" stroke-width="10" fill="none" stroke-linecap="round" opacity="0.7"/>
+  <path d="M432,80 L432,130 M432,80 L382,80" stroke="#1D9E75" stroke-width="10" fill="none" stroke-linecap="round" opacity="0.7"/>
+  <path d="M80,432 L80,382 M80,432 L130,432" stroke="#1D9E75" stroke-width="10" fill="none" stroke-linecap="round" opacity="0.7"/>
+  <path d="M432,432 L432,382 M432,432 L382,432" stroke="#1D9E75" stroke-width="10" fill="none" stroke-linecap="round" opacity="0.7"/>
+  <!-- Red dot center -->
+  <circle cx="256" cy="256" r="28" fill="#E24B4A"/>
+  <circle cx="256" cy="256" r="12" fill="#FF8080"/>
+</svg>

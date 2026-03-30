@@ -973,6 +973,49 @@ function HUDTab({s,profiles,activeId,acquire,confirmChange,setDist,startSim,stop
   const profile=profiles.find(p=>p.id===activeId)||profiles[0];
   const dot=s.locked&&!s.confirm?computeDot(profile,s):null;
   const [dInput,setDInput]=useState("250");
+  const [calcDist,setCalcDist]=useState("100");
+  const [showCalc,setShowCalc]=useState(false);
+
+  // Calcolatore alzo/windage manuale
+  const calcResults = (() => {
+    const d = parseFloat(calcDist);
+    if (!d || d < 5 || d > 1200 || !profile) return null;
+    const V0 = interpolateV0(profile, s.temp);
+    const drop = solveDrop(d, V0, profile.BC, s.temp, s.pres, s.hum);
+    const dropZ = solveDrop(profile.zero, V0, profile.BC, s.temp, s.pres, s.hum);
+    const scopeH = (profile.scopeHeight_cm||6.5)*10;
+    const yLOS = scopeH + (dropZ - scopeH)*(d/profile.zero);
+    const holdover_mm = (yLOS - drop)*(profile.ssfElev||1);
+    const dropMil = holdover_mm / d;
+    const dropMoa = dropMil * 3.437;
+    const clicksMil = dropMil * 10;   // 0.1 MIL click
+    const clicksMoa = dropMoa * 4;    // 0.25 MOA click
+    // windage per 1 m/s crosswind
+    const tof = d / (V0 * 0.72);
+    const lag = (d/V0) - tof;
+    const windPerMs = lag * 1000 / d;  // MIL per m/s
+    const windCorr = windPerMs * s.windSpd * Math.sin(
+      (((s.windDir+s.calHdg)%360 - s.riflHdg)+360)%360 * Math.PI/180
+    );
+    return { dropMil, dropMoa, clicksMil, clicksMoa, windPerMs, windCorr, V0, tof };
+  })();
+
+  // Tabella rapida distanze vicine
+  const quickTable = (() => {
+    if (!profile) return [];
+    const base = parseFloat(calcDist)||100;
+    const V0 = interpolateV0(profile, s.temp);
+    return [-50,-25,0,25,50].map(offset => {
+      const d = base + offset;
+      if (d < 5) return null;
+      const drop = solveDrop(d, V0, profile.BC, s.temp, s.pres, s.hum);
+      const dropZ = solveDrop(profile.zero, V0, profile.BC, s.temp, s.pres, s.hum);
+      const scopeH = (profile.scopeHeight_cm||6.5)*10;
+      const yLOS = scopeH + (dropZ-scopeH)*(d/profile.zero);
+      const mil = (yLOS-drop)/d;
+      return { d, mil, isBase: offset===0 };
+    }).filter(Boolean);
+  })();
 
   return (
     <div style={{padding:20,display:"flex",flexDirection:"column",gap:16}}>
@@ -1013,7 +1056,101 @@ function HUDTab({s,profiles,activeId,acquire,confirmChange,setDist,startSim,stop
         </Btn>
       </div>
 
-      {/* V0 STATUS BOX */}
+      {/* ── CALCOLATORE ALZO / WINDAGE ── */}
+      <div style={{background:C.card2,borderRadius:10,border:`1px solid ${C.border}`,overflow:"hidden"}}>
+        <button onClick={()=>setShowCalc(p=>!p)} style={{
+          width:"100%",padding:"10px 14px",background:"transparent",border:"none",
+          display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer"}}>
+          <div style={{fontSize:11,fontWeight:700,color:C.white,letterSpacing:1}}>
+            🎚 CALCOLATORE ALZO / WINDAGE
+          </div>
+          <span style={{color:C.muted,fontSize:14}}>{showCalc?"▲":"▼"}</span>
+        </button>
+
+        {showCalc&&<div style={{padding:"0 14px 14px",display:"flex",flexDirection:"column",gap:12}}>
+          {/* Input distanza */}
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            <input value={calcDist} onChange={e=>setCalcDist(e.target.value)}
+              placeholder="distanza m" type="number" min={5} max={1200}
+              style={{width:100,padding:"8px 10px",background:C.card,border:`1px solid ${C.green}`,
+                borderRadius:7,color:C.white,fontSize:14,fontFamily:"monospace",textAlign:"center"}}/>
+            <span style={{fontSize:11,color:C.muted}}>metri · T={s.temp.toFixed(0)}°C · P={s.pres.toFixed(0)}hPa</span>
+          </div>
+
+          {calcResults&&<>
+            {/* ALZO */}
+            <div style={{background:C.card,borderRadius:8,padding:"12px 14px",
+              border:`1px solid ${C.green}33`}}>
+              <div style={{fontSize:9,color:C.green,letterSpacing:2,marginBottom:8,fontWeight:700}}>ALZO (ELEVATION)</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
+                {[
+                  {l:"MIL",v:calcResults.dropMil.toFixed(3),c:C.green,big:true},
+                  {l:"MOA",v:calcResults.dropMoa.toFixed(2),c:C.greenL},
+                  {l:"Click 0.1MIL",v:calcResults.clicksMil.toFixed(1),c:C.amber},
+                  {l:"Click ¼MOA",v:calcResults.clicksMoa.toFixed(1),c:C.amber},
+                ].map(item=>(
+                  <div key={item.l} style={{textAlign:"center"}}>
+                    <div style={{fontSize:item.big?22:16,fontWeight:800,fontFamily:"monospace",color:item.c}}>
+                      {item.v}
+                    </div>
+                    <div style={{fontSize:8,color:C.muted,marginTop:2}}>{item.l}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* WINDAGE */}
+            <div style={{background:C.card,borderRadius:8,padding:"12px 14px",
+              border:`1px solid ${C.amber}33`}}>
+              <div style={{fontSize:9,color:C.amber,letterSpacing:2,marginBottom:8,fontWeight:700}}>WINDAGE</div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+                <div>
+                  <div style={{fontSize:9,color:C.muted,marginBottom:4}}>Per 1 m/s vento trasversale</div>
+                  <div style={{fontSize:18,fontWeight:800,fontFamily:"monospace",color:C.amber}}>
+                    {calcResults.windPerMs.toFixed(3)} MIL/m/s
+                  </div>
+                  <div style={{fontSize:10,color:C.muted}}>{(calcResults.windPerMs*3.437).toFixed(3)} MOA/m/s</div>
+                </div>
+                <div>
+                  <div style={{fontSize:9,color:C.muted,marginBottom:4}}>Vento attuale ({s.windSpd.toFixed(1)} m/s)</div>
+                  <div style={{fontSize:18,fontWeight:800,fontFamily:"monospace",
+                    color:Math.abs(calcResults.windCorr)>0.5?C.red:C.amber}}>
+                    {calcResults.windCorr>=0?"+":""}{calcResults.windCorr.toFixed(3)} MIL
+                  </div>
+                  <div style={{fontSize:10,color:C.muted}}>TOF {calcResults.tof.toFixed(2)}s</div>
+                </div>
+              </div>
+            </div>
+
+            {/* TABELLA RAPIDA */}
+            <div style={{background:C.card,borderRadius:8,padding:"10px 14px",
+              border:`1px solid ${C.border}`}}>
+              <div style={{fontSize:9,color:C.muted,letterSpacing:2,marginBottom:8}}>TABELLA RAPIDA</div>
+              <div style={{display:"flex",gap:4,justifyContent:"space-between"}}>
+                {quickTable.map(r=>(
+                  <div key={r.d} onClick={()=>setCalcDist(String(r.d))} style={{
+                    flex:1,textAlign:"center",padding:"6px 4px",borderRadius:6,cursor:"pointer",
+                    background:r.isBase?`${C.green}22`:C.card2,
+                    border:`1px solid ${r.isBase?C.green:C.border}`,
+                    transition:"all .15s"}}>
+                    <div style={{fontSize:10,fontWeight:700,color:r.isBase?C.green:C.offW}}>{r.d}m</div>
+                    <div style={{fontSize:11,fontFamily:"monospace",color:r.isBase?C.greenL:C.muted,fontWeight:r.isBase?800:400}}>
+                      {r.mil.toFixed(3)}
+                    </div>
+                    <div style={{fontSize:8,color:C.muted}}>MIL</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </>}
+
+          {!calcResults&&<div style={{fontSize:11,color:C.muted,textAlign:"center",padding:8}}>
+            Inserisci una distanza valida (5–1200m)
+          </div>}
+        </div>}
+      </div>
+
+      {/* V0 STATUS */}
       {profile&&(
         <div style={{background:C.card2,borderRadius:8,padding:"10px 14px",border:`1px solid ${C.blue}33`,
           display:"flex",gap:16,alignItems:"center",flexWrap:"wrap"}}>
@@ -1027,12 +1164,6 @@ function HUDTab({s,profiles,activeId,acquire,confirmChange,setDist,startSim,stop
             <Lbl>V0 cronografo (attiva ★)</Lbl>
             <div style={{fontSize:18,fontWeight:800,fontFamily:"monospace",color:C.amber}}>{s.v0meas.toFixed(1)} m/s</div>
           </div>}
-          <div>
-            <Lbl>Punti V0 registrati</Lbl>
-            <div style={{fontSize:15,fontWeight:700,fontFamily:"monospace",color:C.muted}}>
-              {(profile.v0Table||[]).length} ({(profile.v0Table||[]).filter(e=>e.source==="measured").length} crono)
-            </div>
-          </div>
           <div style={{marginLeft:"auto"}}>
             <Lbl>Scope H · SSF E/W</Lbl>
             <div style={{fontSize:12,fontFamily:"monospace",color:C.purple}}>
@@ -1604,279 +1735,336 @@ function DispositiviTab({ devices, setDevices, sessionPin, setSessionPin }){
 }
 
 // ─── TAB: GARA ───────────────────────────────────────────────
-const PRS_STAGES = [
+// Beep helper usando AudioContext
+function beep(freq=880, dur=0.1, vol=0.3) {
+  try {
+    const ctx = new (window.AudioContext||window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(vol, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + dur);
+    setTimeout(() => ctx.close(), (dur+0.1)*1000);
+  } catch {}
+}
+function beepAlert(type) {
+  if (type === '30') { beep(660, 0.12, 0.25); }
+  else if (type === '10') { beep(880, 0.1, 0.35); setTimeout(()=>beep(880,0.1,0.35), 200); }
+  else if (type === '5')  { beep(1100,0.08,0.4); setTimeout(()=>beep(1100,0.08,0.4),150); setTimeout(()=>beep(1100,0.08,0.4),300); }
+  else if (type === '0')  { beep(440, 0.6, 0.5); }
+}
+
+const DEFAULT_STAGES = [
   {id:1,name:"Stage 1",targets:5,maxShots:10,maxTime:120},
   {id:2,name:"Stage 2",targets:6,maxShots:12,maxTime:150},
-  {id:3,name:"Stage 3",targets:4,maxShots:8,maxTime:90},
+  {id:3,name:"Stage 3",targets:4,maxShots:8, maxTime:90},
   {id:4,name:"Stage 4",targets:8,maxShots:16,maxTime:180},
   {id:5,name:"Stage 5",targets:5,maxShots:10,maxTime:120},
 ];
 
 function GaraTab({ profile, s }) {
-  const [view, setView] = useState("setup"); // setup | stage | results
+  const [view, setView] = useState("setup");
   const [matchName, setMatchName] = useState("PRS Rimfire 2026");
   const [shooter, setShooter] = useState("");
-  const [stages, setStages] = useState(PRS_STAGES.map(st => ({
-    ...st, hits:0, shots:0, time:0, done:false, note:""
-  })));
+  const [stageDefs, setStageDefs] = useState(DEFAULT_STAGES.map(s=>({...s})));
+  const [results, setResults] = useState(DEFAULT_STAGES.map(s=>({id:s.id,hits:0,shots:0,time:0,done:false,note:""})));
   const [currentStage, setCurrentStage] = useState(0);
   const [running, setRunning] = useState(false);
   const [elapsed, setElapsed] = useState(0);
-  const [startTime, setStartTime] = useState(null);
   const timerRef = useRef(null);
+  const alertsRef = useRef({30:false,10:false,5:false,0:false});
 
-  const st = stages[currentStage];
-  const maxTime = st?.maxTime || 120;
+  const def = stageDefs[currentStage]||stageDefs[0];
+  const res = results[currentStage]||results[0];
+  const maxTime = def.maxTime||120;
   const timeLeft = Math.max(0, maxTime - elapsed);
   const timeColor = timeLeft > 30 ? C.green : timeLeft > 10 ? C.amber : C.red;
 
+  // Timer con beep
   useEffect(() => {
-    if (running) {
-      timerRef.current = setInterval(() => {
-        setElapsed(prev => {
-          const next = prev + 0.1;
-          if (next >= maxTime) { stopTimer(); return maxTime; }
-          return parseFloat(next.toFixed(1));
-        });
-      }, 100);
-    }
+    if (!running) { clearInterval(timerRef.current); return; }
+    // reset alert flags per questo stage
+    alertsRef.current = {30:false,10:false,5:false,0:false};
+    timerRef.current = setInterval(() => {
+      setElapsed(prev => {
+        const next = parseFloat((prev + 0.1).toFixed(1));
+        const left = maxTime - next;
+        // beep alerts
+        if (left <= 30.05 && left > 29.95 && !alertsRef.current[30]) { alertsRef.current[30]=true; beepAlert('30'); }
+        if (left <= 10.05 && left > 9.95  && !alertsRef.current[10]) { alertsRef.current[10]=true; beepAlert('10'); }
+        if (left <= 5.05  && left > 4.95  && !alertsRef.current[5])  { alertsRef.current[5]=true;  beepAlert('5'); }
+        if (left <= 0.05  && !alertsRef.current[0]) { alertsRef.current[0]=true; beepAlert('0'); clearInterval(timerRef.current); setRunning(false); return maxTime; }
+        return next;
+      });
+    }, 100);
     return () => clearInterval(timerRef.current);
   }, [running, maxTime]);
 
-  const startTimer = () => { setStartTime(Date.now()); setElapsed(0); setRunning(true); };
-  const stopTimer = () => { clearInterval(timerRef.current); setRunning(false); };
+  const startTimer = () => { setElapsed(0); setRunning(true); };
+  const stopTimer  = () => { clearInterval(timerRef.current); setRunning(false); };
+  const resetTimer = () => { stopTimer(); setElapsed(0); };
 
-  const updateStage = (field, val) => {
-    setStages(prev => prev.map((st, i) => i === currentStage ? {...st, [field]: val} : st));
-  };
+  const updRes = (field, val) =>
+    setResults(prev => prev.map((r,i) => i===currentStage ? {...r,[field]:val} : r));
+
+  const updDef = (i, field, val) =>
+    setStageDefs(prev => prev.map((d,j) => j===i ? {...d,[field]:val} : d));
 
   const finishStage = () => {
     stopTimer();
-    updateStage("time", parseFloat(elapsed.toFixed(1)));
-    updateStage("done", true);
-    if (currentStage < stages.length - 1) {
-      setCurrentStage(prev => prev + 1);
-      setElapsed(0);
-    } else {
-      setView("results");
-    }
+    updRes("time", parseFloat(elapsed.toFixed(1)));
+    updRes("done", true);
+    if (currentStage < stageDefs.length-1) {
+      setCurrentStage(p=>p+1); setElapsed(0);
+    } else { setView("results"); }
   };
 
-  // PRS scoring: hit = 1pt, miss = 0pt — percentage score
-  const totalHits = stages.reduce((a, st) => a + st.hits, 0);
-  const totalTargets = stages.reduce((a, st) => a + st.targets, 0);
-  const totalShots = stages.reduce((a, st) => a + st.shots, 0);
-  const score = totalTargets > 0 ? ((totalHits / totalTargets) * 100).toFixed(1) : 0;
+  const totalHits    = results.reduce((a,r)=>a+r.hits,0);
+  const totalTargets = stageDefs.reduce((a,d)=>a+d.targets,0);
+  const totalShots   = results.reduce((a,r)=>a+r.shots,0);
+  const score = totalTargets>0 ? ((totalHits/totalTargets)*100).toFixed(1) : "0.0";
+
+  const iS = { padding:"6px 8px", background:C.card, border:`1px solid ${C.border}`,
+    borderRadius:6, color:C.white, fontSize:12, fontFamily:"monospace",
+    width:"100%", boxSizing:"border-box" };
+
+  const BtnPM = ({color,onClick,children}) => (
+    <button onClick={onClick} style={{width:38,height:38,background:`${color}22`,
+      border:`1px solid ${color}`,borderRadius:8,color,fontSize:20,
+      cursor:"pointer",fontWeight:700,flexShrink:0}}>{children}</button>
+  );
 
   const exportResults = () => {
     const win = window.open("","_blank");
     win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8">
     <title>Score Sheet — ${matchName}</title>
     <style>body{font-family:monospace;font-size:11px;margin:20px}
-    h1{font-size:15px}h2{font-size:11px;color:#555;font-weight:normal}
-    table{width:100%;border-collapse:collapse;margin-top:12px}
+    h1{font-size:15px}h2{font-size:11px;color:#555;font-weight:normal;margin:4px 0 12px}
+    table{width:100%;border-collapse:collapse}
     th{background:#1D9E75;color:#fff;padding:5px 8px;font-size:9px}
     td{padding:5px 8px;border-bottom:1px solid #ddd}
-    .score{font-size:24px;font-weight:800;color:#1D9E75}
+    .score{font-size:28px;font-weight:900;color:#1D9E75;margin:12px 0 4px}
+    .footer{margin-top:16px;font-size:8px;color:#999;border-top:1px solid #ddd;padding-top:6px}
     @media print{@page{size:A5;margin:10mm}}</style></head><body>
-    <h1>🎯 ${matchName}</h1>
+    <h1>🎯 Score Sheet — ${matchName}</h1>
     <h2>Tiratore: ${shooter||"—"} · Profilo: ${profile.name} · ${new Date().toLocaleDateString("it-IT")}</h2>
-    <table><thead><tr><th>STAGE</th><th>BERSAGLI</th><th>CENTRI</th><th>COLPI</th><th>TEMPO</th><th>%</th><th>NOTE</th></tr></thead>
-    <tbody>${stages.map(st=>`<tr>
-      <td>${st.name}</td><td>${st.targets}</td><td>${st.hits}</td>
-      <td>${st.shots}</td><td>${st.time}s</td>
-      <td>${st.targets>0?((st.hits/st.targets)*100).toFixed(0):0}%</td>
-      <td>${st.note||"—"}</td></tr>`).join("")}
+    <table><thead><tr>
+      <th>STAGE</th><th>BERSAGLI</th><th>CENTRI</th><th>COLPI</th><th>TEMPO</th><th>%</th><th>NOTE</th>
+    </tr></thead><tbody>
+    ${stageDefs.map((d,i)=>{const r=results[i];const pct=d.targets>0?((r.hits/d.targets)*100).toFixed(0):0;
+      return `<tr><td>${d.name}</td><td>${d.targets}</td><td>${r.hits}</td><td>${r.shots}</td><td>${r.time}s</td><td>${pct}%</td><td>${r.note||"—"}</td></tr>`;
+    }).join("")}
     </tbody></table>
-    <div style="margin-top:20px;text-align:center">
+    <div style="text-align:center;margin-top:20px">
       <div class="score">${score}%</div>
-      <div>Centri: ${totalHits}/${totalTargets} · Colpi sparati: ${totalShots}</div>
+      <div>Centri: ${totalHits}/${totalTargets} · Colpi: ${totalShots}</div>
     </div>
-    <div style="margin-top:16px;font-size:8px;color:#999;border-top:1px solid #ddd;padding-top:6px">
-      ZERO-DOT Ballistic HUD · Shooting Labs · Roncade (TV)
-    </div></body></html>`);
-    win.document.close(); setTimeout(() => win.print(), 400);
+    <div class="footer">ZERO-DOT Ballistic HUD · Shooting Labs · Roncade (TV) · Veneto</div>
+    </body></html>`);
+    win.document.close(); setTimeout(()=>win.print(),400);
   };
 
   return (
     <div style={{padding:20,display:"flex",flexDirection:"column",gap:16}}>
 
-      {/* SETUP */}
+      {/* ── SETUP ── */}
       {view==="setup"&&<>
         <div style={{fontSize:13,fontWeight:700,color:C.white}}>🏆 Setup Gara</div>
+
         <Card>
-          <div style={{display:"flex",flexDirection:"column",gap:12}}>
-            {[{l:"Nome gara",k:matchName,set:setMatchName,ph:"es. PRS Series Italy Rimfire 2026"},
-              {l:"Tiratore",k:shooter,set:setShooter,ph:"es. Nicholas Pelizzaro"}].map(f=>(
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            {[{l:"Nome gara",v:matchName,fn:setMatchName,ph:"es. PRS Series Italy 2026"},
+              {l:"Tiratore",v:shooter,fn:setShooter,ph:"es. Nicholas Pelizzaro"}].map(f=>(
               <div key={f.l}>
                 <Lbl>{f.l}</Lbl>
-                <input value={f.k} onChange={e=>f.set(e.target.value)} placeholder={f.ph}
-                  style={{width:"100%",padding:"9px 12px",background:C.card2,border:`1px solid ${C.border}`,
-                    borderRadius:7,color:C.white,fontSize:13,boxSizing:"border-box"}}/>
+                <input value={f.v} onChange={e=>f.fn(e.target.value)} placeholder={f.ph} style={iS}/>
               </div>
             ))}
           </div>
         </Card>
 
-        {/* STAGES SETUP */}
+        {/* Stage editor */}
         <Card>
-          <div style={{fontSize:11,fontWeight:700,color:C.white,marginBottom:12}}>Stage ({stages.length} totali)</div>
-          {stages.map((st,i)=>(
-            <div key={st.id} style={{display:"grid",gridTemplateColumns:"1fr 60px 60px 70px",gap:8,
-              marginBottom:8,alignItems:"center"}}>
-              <div style={{fontSize:11,color:C.offW}}>{st.name}</div>
-              <div>
-                <Lbl>Bersagli</Lbl>
-                <input type="number" value={st.targets} min={1} max={20}
-                  onChange={e=>setStages(prev=>prev.map((s,j)=>j===i?{...s,targets:parseInt(e.target.value)||1}:s))}
-                  style={{width:"100%",padding:"5px",background:C.card2,border:`1px solid ${C.border}`,
-                    borderRadius:5,color:C.green,fontSize:12,textAlign:"center"}}/>
-              </div>
-              <div>
-                <Lbl>Colpi</Lbl>
-                <input type="number" value={st.maxShots} min={1} max={40}
-                  onChange={e=>setStages(prev=>prev.map((s,j)=>j===i?{...s,maxShots:parseInt(e.target.value)||1}:s))}
-                  style={{width:"100%",padding:"5px",background:C.card2,border:`1px solid ${C.border}`,
-                    borderRadius:5,color:C.amber,fontSize:12,textAlign:"center"}}/>
-              </div>
-              <div>
-                <Lbl>Tempo (s)</Lbl>
-                <input type="number" value={st.maxTime} min={10} max={600}
-                  onChange={e=>setStages(prev=>prev.map((s,j)=>j===i?{...s,maxTime:parseInt(e.target.value)||60}:s))}
-                  style={{width:"100%",padding:"5px",background:C.card2,border:`1px solid ${C.border}`,
-                    borderRadius:5,color:C.purple,fontSize:12,textAlign:"center"}}/>
-              </div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+            <div style={{fontSize:11,fontWeight:700,color:C.white}}>{stageDefs.length} Stage</div>
+            <div style={{display:"flex",gap:6}}>
+              <Btn small color={C.green} onClick={()=>{
+                const n=stageDefs.length+1;
+                setStageDefs(p=>[...p,{id:n,name:`Stage ${n}`,targets:5,maxShots:10,maxTime:120}]);
+                setResults(p=>[...p,{id:n,hits:0,shots:0,time:0,done:false,note:""}]);
+              }}>＋</Btn>
+              {stageDefs.length>1&&<Btn small color={C.red} onClick={()=>{
+                setStageDefs(p=>p.slice(0,-1));
+                setResults(p=>p.slice(0,-1));
+              }}>－</Btn>}
             </div>
-          ))}
-          <div style={{display:"flex",gap:8,marginTop:8}}>
-            <Btn small color={C.green} onClick={()=>setStages(prev=>[...prev,{
-              id:prev.length+1,name:`Stage ${prev.length+1}`,targets:5,maxShots:10,maxTime:120,
-              hits:0,shots:0,time:0,done:false,note:""}])}>+ Stage</Btn>
-            {stages.length>1&&<Btn small color={C.red} onClick={()=>setStages(prev=>prev.slice(0,-1))}>- Stage</Btn>}
+          </div>
+
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            {stageDefs.map((d,i)=>(
+              <div key={d.id} style={{background:C.card2,borderRadius:8,padding:"10px 12px",
+                border:`1px solid ${C.border}`}}>
+                {/* Nome stage */}
+                <input value={d.name} onChange={e=>updDef(i,"name",e.target.value)}
+                  style={{...iS,marginBottom:8,fontWeight:700,color:C.green,background:C.dark}}/>
+                {/* Valori con +/- */}
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+                  {[{l:"Bersagli",k:"targets",c:C.green,min:1,max:20},
+                    {l:"Max colpi",k:"maxShots",c:C.amber,min:1,max:40},
+                    {l:"Tempo (s)",k:"maxTime",c:C.purple,min:10,max:600,step:5}].map(f=>(
+                    <div key={f.k} style={{textAlign:"center"}}>
+                      <div style={{fontSize:9,color:C.muted,marginBottom:4}}>{f.l}</div>
+                      <div style={{display:"flex",alignItems:"center",gap:4,justifyContent:"center"}}>
+                        <button onClick={()=>updDef(i,f.k,Math.max(f.min,(d[f.k]||f.min)-(f.step||1)))}
+                          style={{width:28,height:28,background:`${C.red}22`,border:`1px solid ${C.red}`,
+                            borderRadius:5,color:C.red,fontSize:14,cursor:"pointer",fontWeight:700}}>−</button>
+                        <div style={{fontSize:14,fontWeight:800,fontFamily:"monospace",color:f.c,minWidth:36,textAlign:"center"}}>
+                          {d[f.k]}
+                        </div>
+                        <button onClick={()=>updDef(i,f.k,Math.min(f.max,(d[f.k]||f.min)+(f.step||1)))}
+                          style={{width:28,height:28,background:`${f.c}22`,border:`1px solid ${f.c}`,
+                            borderRadius:5,color:f.c,fontSize:14,cursor:"pointer",fontWeight:700}}>＋</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
           </div>
         </Card>
 
-        <Btn color={C.green} onClick={()=>{setCurrentStage(0);setElapsed(0);setView("stage");
-          setStages(prev=>prev.map(s=>({...s,hits:0,shots:0,time:0,done:false,note:""})));
+        <Btn color={C.green} onClick={()=>{
+          setCurrentStage(0); setElapsed(0); setRunning(false);
+          setResults(stageDefs.map(d=>({id:d.id,hits:0,shots:0,time:0,done:false,note:""})));
+          setView("stage");
         }}>🏁 INIZIA GARA</Btn>
       </>}
 
-      {/* STAGE ATTIVO */}
+      {/* ── STAGE ATTIVO ── */}
       {view==="stage"&&<>
-        {/* PROGRESS */}
-        <div style={{display:"flex",gap:6}}>
-          {stages.map((st,i)=>(
-            <div key={i} onClick={()=>{if(st.done||i===currentStage)setCurrentStage(i);}} style={{
-              flex:1,height:6,borderRadius:3,cursor:"pointer",
-              background:st.done?C.green:i===currentStage?C.amber:C.border,
-              transition:"all .2s"}}/>
+        {/* Progress bar */}
+        <div style={{display:"flex",gap:5}}>
+          {stageDefs.map((d,i)=>(
+            <div key={i} onClick={()=>{setCurrentStage(i);setElapsed(0);stopTimer();}}
+              style={{flex:1,padding:"4px 0",borderRadius:4,cursor:"pointer",textAlign:"center",
+                background:results[i]?.done?`${C.green}33`:i===currentStage?`${C.amber}22`:C.card2,
+                border:`1px solid ${results[i]?.done?C.green:i===currentStage?C.amber:C.border}`,
+                transition:"all .2s"}}>
+              <div style={{fontSize:9,color:results[i]?.done?C.green:i===currentStage?C.amber:C.muted,fontWeight:i===currentStage?700:400}}>
+                {i+1}
+              </div>
+            </div>
           ))}
         </div>
 
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <div style={{fontSize:16,fontWeight:800,color:C.white}}>{st.name}</div>
-          <div style={{fontSize:11,color:C.muted}}>{currentStage+1} / {stages.length}</div>
+          <div style={{fontSize:15,fontWeight:800,color:C.white}}>{def.name}</div>
+          <div style={{fontSize:10,color:C.muted}}>Stage {currentStage+1}/{stageDefs.length}</div>
         </div>
 
-        {/* TIMER */}
-        <Card border={`1px solid ${timeColor}55`} style={{textAlign:"center"}}>
-          <div style={{fontSize:56,fontWeight:900,fontFamily:"monospace",color:timeColor,
-            lineHeight:1,marginBottom:4}}>
-            {Math.floor(timeLeft/60)}:{String(Math.floor(timeLeft%60)).padStart(2,"0")}
-            <span style={{fontSize:18,color:C.muted}}>.{String(Math.round((timeLeft%1)*10)).padStart(1,"0")}</span>
+        {/* TIMER GRANDE */}
+        <div style={{background:C.card,borderRadius:12,padding:"20px 16px",textAlign:"center",
+          border:`2px solid ${timeColor}`,boxShadow:`0 0 20px ${timeColor}22`,transition:"border-color .5s"}}>
+          <div style={{fontSize:72,fontWeight:900,fontFamily:"monospace",color:timeColor,
+            lineHeight:1,letterSpacing:-2}}>
+            {String(Math.floor(timeLeft/60)).padStart(1,"0")}:{String(Math.floor(timeLeft%60)).padStart(2,"0")}
+            <span style={{fontSize:24,color:C.muted,fontWeight:400}}>.{String(Math.round((timeLeft%1)*10))}</span>
           </div>
-          <div style={{fontSize:10,color:C.muted,marginBottom:12}}>
-            {running?"⏱ IN CORSO":elapsed>0?"⏹ FERMATO":"◼ PRONTO"}
-            {" · "}tempo max {st.maxTime}s
+          <div style={{fontSize:10,color:C.muted,marginBottom:14}}>
+            max {def.maxTime}s · {running?"⏱ IN CORSO":elapsed>0?"⏹ FERMO":"◼ PRONTO"}
           </div>
           <div style={{display:"flex",gap:10,justifyContent:"center"}}>
-            {!running&&elapsed===0&&<Btn color={C.green} onClick={startTimer}>▶ START</Btn>}
+            {!running&&<Btn color={C.green} onClick={startTimer}>▶ START</Btn>}
             {running&&<Btn color={C.red} onClick={stopTimer}>⏹ STOP</Btn>}
-            {!running&&elapsed>0&&<Btn color={C.amber} onClick={()=>{setElapsed(0);setRunning(false);}}>↺ RESET</Btn>}
+            {!running&&elapsed>0&&<Btn color={C.amber} onClick={resetTimer}>↺</Btn>}
           </div>
-        </Card>
+        </div>
 
-        {/* CENTRI / COLPI */}
+        {/* CENTRI E COLPI */}
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-          {[{l:"CENTRI",k:"hits",max:st.targets,c:C.green,icon:"🎯"},
-            {l:"COLPI SPARATI",k:"shots",max:st.maxShots,c:C.amber,icon:"💥"}].map(f=>(
-            <Card key={f.k} border={`1px solid ${f.c}44`} style={{textAlign:"center"}}>
-              <div style={{fontSize:10,color:C.muted,marginBottom:8}}>{f.icon} {f.l}</div>
-              <div style={{fontSize:40,fontWeight:900,fontFamily:"monospace",color:f.c,lineHeight:1}}>
-                {st[f.k]}
+          {[{l:"CENTRI",k:"hits",max:def.targets,c:C.green,icon:"🎯"},
+            {l:"COLPI",k:"shots",max:def.maxShots,c:C.amber,icon:"💥"}].map(f=>(
+            <div key={f.k} style={{background:C.card,borderRadius:10,padding:"14px 12px",
+              border:`1px solid ${f.c}33`,textAlign:"center"}}>
+              <div style={{fontSize:10,color:C.muted,marginBottom:6}}>{f.icon} {f.l}</div>
+              <div style={{fontSize:44,fontWeight:900,fontFamily:"monospace",color:f.c,lineHeight:1}}>
+                {res[f.k]}
               </div>
-              <div style={{fontSize:10,color:C.muted,marginBottom:12}}>/ {f.max}</div>
+              <div style={{fontSize:10,color:C.muted,marginBottom:10}}>/ {f.max}</div>
               <div style={{display:"flex",gap:8,justifyContent:"center"}}>
-                <button onClick={()=>updateStage(f.k, Math.max(0, st[f.k]-1))} style={{
-                  width:36,height:36,background:`${C.red}22`,border:`1px solid ${C.red}`,
-                  borderRadius:8,color:C.red,fontSize:20,cursor:"pointer",fontWeight:700}}>−</button>
-                <button onClick={()=>updateStage(f.k, Math.min(f.max, st[f.k]+1))} style={{
-                  width:36,height:36,background:`${f.c}22`,border:`1px solid ${f.c}`,
-                  borderRadius:8,color:f.c,fontSize:20,cursor:"pointer",fontWeight:700}}>+</button>
+                <BtnPM color={C.red} onClick={()=>updRes(f.k,Math.max(0,res[f.k]-1))}>−</BtnPM>
+                <BtnPM color={f.c} onClick={()=>updRes(f.k,Math.min(f.max,res[f.k]+1))}>+</BtnPM>
               </div>
-            </Card>
+            </div>
           ))}
         </div>
 
-        {/* % STAGE */}
-        <div style={{background:C.card2,borderRadius:8,padding:"10px 16px",
+        {/* Score stage */}
+        <div style={{background:C.card2,borderRadius:8,padding:"10px 14px",
           display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <span style={{fontSize:11,color:C.muted}}>Score stage</span>
-          <span style={{fontSize:18,fontWeight:800,fontFamily:"monospace",
-            color:st.targets>0&&st.hits/st.targets>=0.8?C.green:C.amber}}>
-            {st.targets>0?((st.hits/st.targets)*100).toFixed(0):0}%
+          <div>
+            <span style={{fontSize:11,color:C.muted}}>Score stage · </span>
+            <span style={{fontSize:11,color:C.muted}}>Elapsed: </span>
+            <span style={{fontSize:11,fontFamily:"monospace",color:C.purple}}>{elapsed.toFixed(1)}s</span>
+          </div>
+          <span style={{fontSize:22,fontWeight:800,fontFamily:"monospace",
+            color:def.targets>0&&res.hits/def.targets>=0.8?C.green:C.amber}}>
+            {def.targets>0?((res.hits/def.targets)*100).toFixed(0):0}%
           </span>
         </div>
 
-        {/* NOTE */}
-        <div>
-          <Lbl>Note stage</Lbl>
-          <input value={st.note} onChange={e=>updateStage("note",e.target.value)}
-            placeholder="es. vento forte, cantata..."
-            style={{width:"100%",padding:"9px 12px",background:C.card2,border:`1px solid ${C.border}`,
-              borderRadius:7,color:C.white,fontSize:12,boxSizing:"border-box"}}/>
-        </div>
+        {/* Note */}
+        <input value={res.note} onChange={e=>updRes("note",e.target.value)}
+          placeholder="Note stage (es. vento forte, cantata...)"
+          style={{...iS,padding:"9px 12px"}}/>
 
+        {/* Nav */}
         <div style={{display:"flex",gap:10}}>
-          {currentStage>0&&<Btn color={C.muted} small onClick={()=>{setCurrentStage(p=>p-1);setElapsed(0);}}>← Precedente</Btn>}
+          {currentStage>0&&<Btn color={C.muted} small onClick={()=>{setCurrentStage(p=>p-1);resetTimer();}}>← Prec</Btn>}
           <Btn color={C.green} style={{flex:1}} onClick={finishStage}>
-            {currentStage<stages.length-1?"Prossimo Stage →":"🏆 FINE GARA"}
+            {currentStage<stageDefs.length-1?"Stage successivo →":"🏆 FINE GARA"}
           </Btn>
         </div>
+        <Btn color={C.muted} small onClick={()=>{stopTimer();setView("setup");}}>⚙ Torna al setup</Btn>
       </>}
 
-      {/* RESULTS */}
+      {/* ── RISULTATI ── */}
       {view==="results"&&<>
-        <div style={{textAlign:"center",padding:"20px 0"}}>
-          <div style={{fontSize:12,color:C.muted,marginBottom:4}}>SCORE FINALE</div>
-          <div style={{fontSize:64,fontWeight:900,fontFamily:"monospace",
+        <div style={{textAlign:"center",padding:"16px 0 8px"}}>
+          <div style={{fontSize:11,color:C.muted,letterSpacing:2,marginBottom:4}}>SCORE FINALE</div>
+          <div style={{fontSize:72,fontWeight:900,fontFamily:"monospace",lineHeight:1,
             color:parseFloat(score)>=80?C.green:parseFloat(score)>=60?C.amber:C.red}}>
             {score}%
           </div>
-          <div style={{fontSize:13,color:C.muted}}>
+          <div style={{fontSize:13,color:C.muted,marginTop:4}}>
             {totalHits}/{totalTargets} centri · {totalShots} colpi sparati
           </div>
-          {shooter&&<div style={{fontSize:12,color:C.offW,marginTop:4}}>{shooter}</div>}
+          {shooter&&<div style={{fontSize:12,color:C.offW,marginTop:4,fontWeight:600}}>{shooter}</div>}
+          <div style={{fontSize:11,color:C.muted}}>{matchName}</div>
         </div>
 
-        <Card>
+        <Card style={{padding:0,overflow:"hidden"}}>
           <table style={{width:"100%",borderCollapse:"collapse",fontSize:11,fontFamily:"monospace"}}>
             <thead>
-              <tr style={{borderBottom:`1px solid ${C.border}`}}>
+              <tr style={{background:C.mid}}>
                 {["STAGE","CENTRI","COLPI","TEMPO","%"].map(h=>(
-                  <th key={h} style={{padding:"5px 8px",color:C.muted,textAlign:"left",fontSize:9,fontWeight:600}}>{h}</th>
+                  <th key={h} style={{padding:"6px 8px",color:C.muted,textAlign:"left",fontSize:9,fontWeight:600}}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {stages.map((st,i)=>{
-                const pct = st.targets>0?((st.hits/st.targets)*100).toFixed(0):0;
+              {stageDefs.map((d,i)=>{
+                const r=results[i];
+                const pct=d.targets>0?((r.hits/d.targets)*100).toFixed(0):"0";
                 return (
-                  <tr key={i} style={{borderTop:`1px solid ${C.border}11`,background:i%2?C.card2:"transparent"}}>
-                    <td style={{padding:"5px 8px",color:C.offW}}>{st.name}</td>
-                    <td style={{padding:"5px 8px",color:C.green,fontWeight:700}}>{st.hits}/{st.targets}</td>
-                    <td style={{padding:"5px 8px",color:C.amber}}>{st.shots}</td>
-                    <td style={{padding:"5px 8px",color:C.purple}}>{st.time}s</td>
+                  <tr key={i} style={{borderTop:`1px solid ${C.border}`,background:i%2?C.card2:C.card}}>
+                    <td style={{padding:"5px 8px",color:C.offW,fontWeight:600}}>{d.name}</td>
+                    <td style={{padding:"5px 8px",color:C.green,fontWeight:700}}>{r.hits}/{d.targets}</td>
+                    <td style={{padding:"5px 8px",color:C.amber}}>{r.shots}</td>
+                    <td style={{padding:"5px 8px",color:C.purple}}>{r.time}s</td>
                     <td style={{padding:"5px 8px",color:parseInt(pct)>=80?C.green:C.amber,fontWeight:700}}>{pct}%</td>
                   </tr>
                 );
@@ -1887,7 +2075,7 @@ function GaraTab({ profile, s }) {
 
         <div style={{display:"flex",gap:10}}>
           <Btn color={C.purple} onClick={exportResults}>🖨 Score Sheet</Btn>
-          <Btn color={C.muted} onClick={()=>setView("setup")} style={{flex:1}}>↺ Nuova gara</Btn>
+          <Btn color={C.muted} style={{flex:1}} onClick={()=>setView("setup")}>↺ Nuova gara</Btn>
         </div>
       </>}
     </div>
