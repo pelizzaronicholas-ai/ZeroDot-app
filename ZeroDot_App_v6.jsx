@@ -44,23 +44,58 @@ const C = {
 const PROFILE_COLORS = [C.green, C.amber, C.purple, C.red, C.greenL, C.blue, "#E24BAA", "#9E751D"];
 
 // ─── AUTH SYSTEM ─────────────────────────────────────────────
-// Simple hash (djb2 - sufficient for local storage demo)
 function hashPwd(str) {
   let h = 5381;
   for (let i = 0; i < str.length; i++) h = ((h << 5) + h) ^ str.charCodeAt(i);
   return (h >>> 0).toString(16);
 }
+
+// Storage robusto: localStorage diretto con fallback su window.storage (artifact Claude)
+function lsGet(key) {
+  try { const v = localStorage.getItem("zd_"+key); return v ? JSON.parse(v) : null; } catch { return null; }
+}
+function lsSet(key, val) {
+  try { localStorage.setItem("zd_"+key, JSON.stringify(val)); return true; } catch { return false; }
+}
+function lsDel(key) {
+  try { localStorage.removeItem("zd_"+key); return true; } catch { return false; }
+}
+
 async function loadUsers() {
+  // Prima prova localStorage (GitHub Pages), poi window.storage (artifact Claude)
+  const local = lsGet("zerodot_users");
+  if (local) return local;
   try { const r = await window.storage.get("zerodot_users"); if (r?.value) return JSON.parse(r.value); } catch {}
   return [];
 }
-async function saveUsers(u) { try { await window.storage.set("zerodot_users", JSON.stringify(u)); } catch {} }
+async function saveUsers(u) {
+  lsSet("zerodot_users", u);
+  try { await window.storage.set("zerodot_users", JSON.stringify(u)); } catch {}
+}
 async function loadSession() {
+  const local = lsGet("zerodot_session");
+  if (local) return local;
   try { const r = await window.storage.get("zerodot_session"); if (r?.value) return JSON.parse(r.value); } catch {}
   return null;
 }
-async function saveSession(s) { try { await window.storage.set("zerodot_session", JSON.stringify(s)); } catch {} }
-async function clearSession() { try { await window.storage.delete("zerodot_session"); } catch {} }
+async function saveSession(s) {
+  lsSet("zerodot_session", s);
+  try { await window.storage.set("zerodot_session", JSON.stringify(s)); } catch {}
+}
+async function clearSession() {
+  lsDel("zerodot_session");
+  try { await window.storage.delete("zerodot_session"); } catch {}
+}
+async function loadProfilesForUser(userId) {
+  const local = lsGet("profiles_"+userId);
+  if (local) return local;
+  try { const r = await window.storage.get("zerodot_v4_profiles_"+userId); if (r?.value) return JSON.parse(r.value); } catch {}
+  return null;
+}
+async function saveProfilesForUser(userId, profiles) {
+  lsSet("profiles_"+userId, profiles);
+  try { await window.storage.set("zerodot_v4_profiles_"+userId, JSON.stringify(profiles)); } catch {}
+}
 
 // ─── AUTH SCREEN ─────────────────────────────────────────────
 // ─── AUTH SCREEN ─────────────────────────────────────────────
@@ -1692,19 +1727,14 @@ export default function ZeroDotApp(){
   useEffect(()=>{
     if(!session) return;
     (async()=>{
-      try {
-        const r = await window.storage.get("zerodot_v4_profiles_"+session.userId);
-        if(r?.value) setProfiles(JSON.parse(r.value));
-        else setProfiles(DEFAULT_PROFILES);
-      } catch { setProfiles(DEFAULT_PROFILES); }
+      const saved = await loadProfilesForUser(session.userId);
+      setProfiles(saved && saved.length>0 ? saved : DEFAULT_PROFILES);
     })();
   },[session]);
 
   const persist=(np)=>{
     setProfiles(np);
-    if(session) {
-      try { window.storage.set("zerodot_v4_profiles_"+session.userId, JSON.stringify(np)); } catch {}
-    }
+    if(session) saveProfilesForUser(session.userId, np);
   };
 
   const handleLogin=(sess)=>{ setSession(sess); };
