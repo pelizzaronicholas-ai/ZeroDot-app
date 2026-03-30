@@ -2,11 +2,32 @@
 <html lang="it">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>ZERO-DOT Ballistic HUD</title>
-    <script type="module" crossorigin src="/ZeroDot-app/assets/index-AWPl2OnJ.js"></script>
+
+    <!-- PWA -->
+    <link rel="manifest" href="/ZeroDot-app/manifest.json" />
+    <meta name="theme-color" content="#1D9E75" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="ZERO-DOT" />
+    <link rel="apple-touch-icon" href="/ZeroDot-app/icon-192.png" />
+
+    <!-- SEO -->
+    <meta name="description" content="Sistema HUD balistico per tiro di precisione PRS rimfire — Shooting Labs" />
+    <script type="module" crossorigin src="/ZeroDot-app/assets/index-C04P5Xvt.js"></script>
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/ZeroDot-app/sw.js')
+            .then(r => console.log('SW registered:', r.scope))
+            .catch(e => console.log('SW error:', e));
+        });
+      }
+    </script>
   </body>
 </html>
