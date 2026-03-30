@@ -1603,6 +1603,297 @@ function DispositiviTab({ devices, setDevices, sessionPin, setSessionPin }){
   );
 }
 
+// ─── TAB: GARA ───────────────────────────────────────────────
+const PRS_STAGES = [
+  {id:1,name:"Stage 1",targets:5,maxShots:10,maxTime:120},
+  {id:2,name:"Stage 2",targets:6,maxShots:12,maxTime:150},
+  {id:3,name:"Stage 3",targets:4,maxShots:8,maxTime:90},
+  {id:4,name:"Stage 4",targets:8,maxShots:16,maxTime:180},
+  {id:5,name:"Stage 5",targets:5,maxShots:10,maxTime:120},
+];
+
+function GaraTab({ profile, s }) {
+  const [view, setView] = useState("setup"); // setup | stage | results
+  const [matchName, setMatchName] = useState("PRS Rimfire 2026");
+  const [shooter, setShooter] = useState("");
+  const [stages, setStages] = useState(PRS_STAGES.map(st => ({
+    ...st, hits:0, shots:0, time:0, done:false, note:""
+  })));
+  const [currentStage, setCurrentStage] = useState(0);
+  const [running, setRunning] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const [startTime, setStartTime] = useState(null);
+  const timerRef = useRef(null);
+
+  const st = stages[currentStage];
+  const maxTime = st?.maxTime || 120;
+  const timeLeft = Math.max(0, maxTime - elapsed);
+  const timeColor = timeLeft > 30 ? C.green : timeLeft > 10 ? C.amber : C.red;
+
+  useEffect(() => {
+    if (running) {
+      timerRef.current = setInterval(() => {
+        setElapsed(prev => {
+          const next = prev + 0.1;
+          if (next >= maxTime) { stopTimer(); return maxTime; }
+          return parseFloat(next.toFixed(1));
+        });
+      }, 100);
+    }
+    return () => clearInterval(timerRef.current);
+  }, [running, maxTime]);
+
+  const startTimer = () => { setStartTime(Date.now()); setElapsed(0); setRunning(true); };
+  const stopTimer = () => { clearInterval(timerRef.current); setRunning(false); };
+
+  const updateStage = (field, val) => {
+    setStages(prev => prev.map((st, i) => i === currentStage ? {...st, [field]: val} : st));
+  };
+
+  const finishStage = () => {
+    stopTimer();
+    updateStage("time", parseFloat(elapsed.toFixed(1)));
+    updateStage("done", true);
+    if (currentStage < stages.length - 1) {
+      setCurrentStage(prev => prev + 1);
+      setElapsed(0);
+    } else {
+      setView("results");
+    }
+  };
+
+  // PRS scoring: hit = 1pt, miss = 0pt — percentage score
+  const totalHits = stages.reduce((a, st) => a + st.hits, 0);
+  const totalTargets = stages.reduce((a, st) => a + st.targets, 0);
+  const totalShots = stages.reduce((a, st) => a + st.shots, 0);
+  const score = totalTargets > 0 ? ((totalHits / totalTargets) * 100).toFixed(1) : 0;
+
+  const exportResults = () => {
+    const win = window.open("","_blank");
+    win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8">
+    <title>Score Sheet — ${matchName}</title>
+    <style>body{font-family:monospace;font-size:11px;margin:20px}
+    h1{font-size:15px}h2{font-size:11px;color:#555;font-weight:normal}
+    table{width:100%;border-collapse:collapse;margin-top:12px}
+    th{background:#1D9E75;color:#fff;padding:5px 8px;font-size:9px}
+    td{padding:5px 8px;border-bottom:1px solid #ddd}
+    .score{font-size:24px;font-weight:800;color:#1D9E75}
+    @media print{@page{size:A5;margin:10mm}}</style></head><body>
+    <h1>🎯 ${matchName}</h1>
+    <h2>Tiratore: ${shooter||"—"} · Profilo: ${profile.name} · ${new Date().toLocaleDateString("it-IT")}</h2>
+    <table><thead><tr><th>STAGE</th><th>BERSAGLI</th><th>CENTRI</th><th>COLPI</th><th>TEMPO</th><th>%</th><th>NOTE</th></tr></thead>
+    <tbody>${stages.map(st=>`<tr>
+      <td>${st.name}</td><td>${st.targets}</td><td>${st.hits}</td>
+      <td>${st.shots}</td><td>${st.time}s</td>
+      <td>${st.targets>0?((st.hits/st.targets)*100).toFixed(0):0}%</td>
+      <td>${st.note||"—"}</td></tr>`).join("")}
+    </tbody></table>
+    <div style="margin-top:20px;text-align:center">
+      <div class="score">${score}%</div>
+      <div>Centri: ${totalHits}/${totalTargets} · Colpi sparati: ${totalShots}</div>
+    </div>
+    <div style="margin-top:16px;font-size:8px;color:#999;border-top:1px solid #ddd;padding-top:6px">
+      ZERO-DOT Ballistic HUD · Shooting Labs · Roncade (TV)
+    </div></body></html>`);
+    win.document.close(); setTimeout(() => win.print(), 400);
+  };
+
+  return (
+    <div style={{padding:20,display:"flex",flexDirection:"column",gap:16}}>
+
+      {/* SETUP */}
+      {view==="setup"&&<>
+        <div style={{fontSize:13,fontWeight:700,color:C.white}}>🏆 Setup Gara</div>
+        <Card>
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            {[{l:"Nome gara",k:matchName,set:setMatchName,ph:"es. PRS Series Italy Rimfire 2026"},
+              {l:"Tiratore",k:shooter,set:setShooter,ph:"es. Nicholas Pelizzaro"}].map(f=>(
+              <div key={f.l}>
+                <Lbl>{f.l}</Lbl>
+                <input value={f.k} onChange={e=>f.set(e.target.value)} placeholder={f.ph}
+                  style={{width:"100%",padding:"9px 12px",background:C.card2,border:`1px solid ${C.border}`,
+                    borderRadius:7,color:C.white,fontSize:13,boxSizing:"border-box"}}/>
+              </div>
+            ))}
+          </div>
+        </Card>
+
+        {/* STAGES SETUP */}
+        <Card>
+          <div style={{fontSize:11,fontWeight:700,color:C.white,marginBottom:12}}>Stage ({stages.length} totali)</div>
+          {stages.map((st,i)=>(
+            <div key={st.id} style={{display:"grid",gridTemplateColumns:"1fr 60px 60px 70px",gap:8,
+              marginBottom:8,alignItems:"center"}}>
+              <div style={{fontSize:11,color:C.offW}}>{st.name}</div>
+              <div>
+                <Lbl>Bersagli</Lbl>
+                <input type="number" value={st.targets} min={1} max={20}
+                  onChange={e=>setStages(prev=>prev.map((s,j)=>j===i?{...s,targets:parseInt(e.target.value)||1}:s))}
+                  style={{width:"100%",padding:"5px",background:C.card2,border:`1px solid ${C.border}`,
+                    borderRadius:5,color:C.green,fontSize:12,textAlign:"center"}}/>
+              </div>
+              <div>
+                <Lbl>Colpi</Lbl>
+                <input type="number" value={st.maxShots} min={1} max={40}
+                  onChange={e=>setStages(prev=>prev.map((s,j)=>j===i?{...s,maxShots:parseInt(e.target.value)||1}:s))}
+                  style={{width:"100%",padding:"5px",background:C.card2,border:`1px solid ${C.border}`,
+                    borderRadius:5,color:C.amber,fontSize:12,textAlign:"center"}}/>
+              </div>
+              <div>
+                <Lbl>Tempo (s)</Lbl>
+                <input type="number" value={st.maxTime} min={10} max={600}
+                  onChange={e=>setStages(prev=>prev.map((s,j)=>j===i?{...s,maxTime:parseInt(e.target.value)||60}:s))}
+                  style={{width:"100%",padding:"5px",background:C.card2,border:`1px solid ${C.border}`,
+                    borderRadius:5,color:C.purple,fontSize:12,textAlign:"center"}}/>
+              </div>
+            </div>
+          ))}
+          <div style={{display:"flex",gap:8,marginTop:8}}>
+            <Btn small color={C.green} onClick={()=>setStages(prev=>[...prev,{
+              id:prev.length+1,name:`Stage ${prev.length+1}`,targets:5,maxShots:10,maxTime:120,
+              hits:0,shots:0,time:0,done:false,note:""}])}>+ Stage</Btn>
+            {stages.length>1&&<Btn small color={C.red} onClick={()=>setStages(prev=>prev.slice(0,-1))}>- Stage</Btn>}
+          </div>
+        </Card>
+
+        <Btn color={C.green} onClick={()=>{setCurrentStage(0);setElapsed(0);setView("stage");
+          setStages(prev=>prev.map(s=>({...s,hits:0,shots:0,time:0,done:false,note:""})));
+        }}>🏁 INIZIA GARA</Btn>
+      </>}
+
+      {/* STAGE ATTIVO */}
+      {view==="stage"&&<>
+        {/* PROGRESS */}
+        <div style={{display:"flex",gap:6}}>
+          {stages.map((st,i)=>(
+            <div key={i} onClick={()=>{if(st.done||i===currentStage)setCurrentStage(i);}} style={{
+              flex:1,height:6,borderRadius:3,cursor:"pointer",
+              background:st.done?C.green:i===currentStage?C.amber:C.border,
+              transition:"all .2s"}}/>
+          ))}
+        </div>
+
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div style={{fontSize:16,fontWeight:800,color:C.white}}>{st.name}</div>
+          <div style={{fontSize:11,color:C.muted}}>{currentStage+1} / {stages.length}</div>
+        </div>
+
+        {/* TIMER */}
+        <Card border={`1px solid ${timeColor}55`} style={{textAlign:"center"}}>
+          <div style={{fontSize:56,fontWeight:900,fontFamily:"monospace",color:timeColor,
+            lineHeight:1,marginBottom:4}}>
+            {Math.floor(timeLeft/60)}:{String(Math.floor(timeLeft%60)).padStart(2,"0")}
+            <span style={{fontSize:18,color:C.muted}}>.{String(Math.round((timeLeft%1)*10)).padStart(1,"0")}</span>
+          </div>
+          <div style={{fontSize:10,color:C.muted,marginBottom:12}}>
+            {running?"⏱ IN CORSO":elapsed>0?"⏹ FERMATO":"◼ PRONTO"}
+            {" · "}tempo max {st.maxTime}s
+          </div>
+          <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+            {!running&&elapsed===0&&<Btn color={C.green} onClick={startTimer}>▶ START</Btn>}
+            {running&&<Btn color={C.red} onClick={stopTimer}>⏹ STOP</Btn>}
+            {!running&&elapsed>0&&<Btn color={C.amber} onClick={()=>{setElapsed(0);setRunning(false);}}>↺ RESET</Btn>}
+          </div>
+        </Card>
+
+        {/* CENTRI / COLPI */}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+          {[{l:"CENTRI",k:"hits",max:st.targets,c:C.green,icon:"🎯"},
+            {l:"COLPI SPARATI",k:"shots",max:st.maxShots,c:C.amber,icon:"💥"}].map(f=>(
+            <Card key={f.k} border={`1px solid ${f.c}44`} style={{textAlign:"center"}}>
+              <div style={{fontSize:10,color:C.muted,marginBottom:8}}>{f.icon} {f.l}</div>
+              <div style={{fontSize:40,fontWeight:900,fontFamily:"monospace",color:f.c,lineHeight:1}}>
+                {st[f.k]}
+              </div>
+              <div style={{fontSize:10,color:C.muted,marginBottom:12}}>/ {f.max}</div>
+              <div style={{display:"flex",gap:8,justifyContent:"center"}}>
+                <button onClick={()=>updateStage(f.k, Math.max(0, st[f.k]-1))} style={{
+                  width:36,height:36,background:`${C.red}22`,border:`1px solid ${C.red}`,
+                  borderRadius:8,color:C.red,fontSize:20,cursor:"pointer",fontWeight:700}}>−</button>
+                <button onClick={()=>updateStage(f.k, Math.min(f.max, st[f.k]+1))} style={{
+                  width:36,height:36,background:`${f.c}22`,border:`1px solid ${f.c}`,
+                  borderRadius:8,color:f.c,fontSize:20,cursor:"pointer",fontWeight:700}}>+</button>
+              </div>
+            </Card>
+          ))}
+        </div>
+
+        {/* % STAGE */}
+        <div style={{background:C.card2,borderRadius:8,padding:"10px 16px",
+          display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontSize:11,color:C.muted}}>Score stage</span>
+          <span style={{fontSize:18,fontWeight:800,fontFamily:"monospace",
+            color:st.targets>0&&st.hits/st.targets>=0.8?C.green:C.amber}}>
+            {st.targets>0?((st.hits/st.targets)*100).toFixed(0):0}%
+          </span>
+        </div>
+
+        {/* NOTE */}
+        <div>
+          <Lbl>Note stage</Lbl>
+          <input value={st.note} onChange={e=>updateStage("note",e.target.value)}
+            placeholder="es. vento forte, cantata..."
+            style={{width:"100%",padding:"9px 12px",background:C.card2,border:`1px solid ${C.border}`,
+              borderRadius:7,color:C.white,fontSize:12,boxSizing:"border-box"}}/>
+        </div>
+
+        <div style={{display:"flex",gap:10}}>
+          {currentStage>0&&<Btn color={C.muted} small onClick={()=>{setCurrentStage(p=>p-1);setElapsed(0);}}>← Precedente</Btn>}
+          <Btn color={C.green} style={{flex:1}} onClick={finishStage}>
+            {currentStage<stages.length-1?"Prossimo Stage →":"🏆 FINE GARA"}
+          </Btn>
+        </div>
+      </>}
+
+      {/* RESULTS */}
+      {view==="results"&&<>
+        <div style={{textAlign:"center",padding:"20px 0"}}>
+          <div style={{fontSize:12,color:C.muted,marginBottom:4}}>SCORE FINALE</div>
+          <div style={{fontSize:64,fontWeight:900,fontFamily:"monospace",
+            color:parseFloat(score)>=80?C.green:parseFloat(score)>=60?C.amber:C.red}}>
+            {score}%
+          </div>
+          <div style={{fontSize:13,color:C.muted}}>
+            {totalHits}/{totalTargets} centri · {totalShots} colpi sparati
+          </div>
+          {shooter&&<div style={{fontSize:12,color:C.offW,marginTop:4}}>{shooter}</div>}
+        </div>
+
+        <Card>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:11,fontFamily:"monospace"}}>
+            <thead>
+              <tr style={{borderBottom:`1px solid ${C.border}`}}>
+                {["STAGE","CENTRI","COLPI","TEMPO","%"].map(h=>(
+                  <th key={h} style={{padding:"5px 8px",color:C.muted,textAlign:"left",fontSize:9,fontWeight:600}}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {stages.map((st,i)=>{
+                const pct = st.targets>0?((st.hits/st.targets)*100).toFixed(0):0;
+                return (
+                  <tr key={i} style={{borderTop:`1px solid ${C.border}11`,background:i%2?C.card2:"transparent"}}>
+                    <td style={{padding:"5px 8px",color:C.offW}}>{st.name}</td>
+                    <td style={{padding:"5px 8px",color:C.green,fontWeight:700}}>{st.hits}/{st.targets}</td>
+                    <td style={{padding:"5px 8px",color:C.amber}}>{st.shots}</td>
+                    <td style={{padding:"5px 8px",color:C.purple}}>{st.time}s</td>
+                    <td style={{padding:"5px 8px",color:parseInt(pct)>=80?C.green:C.amber,fontWeight:700}}>{pct}%</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </Card>
+
+        <div style={{display:"flex",gap:10}}>
+          <Btn color={C.purple} onClick={exportResults}>🖨 Score Sheet</Btn>
+          <Btn color={C.muted} onClick={()=>setView("setup")} style={{flex:1}}>↺ Nuova gara</Btn>
+        </div>
+      </>}
+    </div>
+  );
+}
+
 // ─── TAB: AI ─────────────────────────────────────────────────
 function AITab({s,profile}){
   const [msgs,setMsgs]=useState([{role:"ai",content:"Ciao! Sono l'assistente balistico AI di ZERO-DOT — powered by Claude.\n\nPosso aiutarti con:\n• Analisi condizioni di tiro e calcoli balistici\n• Confronto profili ammo · Analisi tabella V0/T\n• Suggerimenti calibrazione SSF e scope height\n• Interpretazione range card e holdover\n\nTutti i dati sensori e profilo sono già caricati."}]);
@@ -1766,7 +2057,7 @@ export default function ZeroDotApp(){
 
   if(!session) return <AuthScreen onLogin={handleLogin}/>;
 
-  const tabs=["HUD","Profili","Sensori","Log","Dispositivi","AI"];
+  const tabs=["HUD","Profili","Sensori","Log","Gara","Dispositivi","AI"];
 
   return (
     <div style={{background:C.dark,minHeight:"100vh",color:C.white,
@@ -1871,6 +2162,7 @@ export default function ZeroDotApp(){
                                onDelete={id=>setDeleteConfirm(id)} currentTemp={s.temp}/>}
       {tab==="Sensori"     &&<SensoriTab s={s} profile={profile}/>}
       {tab==="Log"         &&<LogTab s={s} profile={profile}/>}
+      {tab==="Gara"        &&<GaraTab profile={profile} s={s}/>}
       {tab==="Dispositivi" &&<DispositiviTab devices={devices} setDevices={setDevices}
                                sessionPin={sessionPin} setSessionPin={setSessionPin}/>}
       {tab==="AI"          &&<AITab s={s} profile={profile}/>}
