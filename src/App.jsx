@@ -1765,6 +1765,375 @@ const DEFAULT_STAGES = [
   {id:5,name:"Stage 5",targets:5,maxShots:10,maxTime:120},
 ];
 
+// ─── STAGE BUILDER TAB ──────────────────────────────────────
+const STAGE_BC = 0.200, STAGE_V0 = 330, STAGE_SCOPE_MM = 65, STAGE_ZERO = 50;
+
+function stageDropMIL(dist){
+  if(dist < 5) return 0;
+  const dD = solveDrop(dist,       STAGE_V0, STAGE_BC, 15, 1013, 50);
+  const dZ = solveDrop(STAGE_ZERO, STAGE_V0, STAGE_BC, 15, 1013, 50);
+  const los = STAGE_SCOPE_MM + (dZ - STAGE_SCOPE_MM) * (dist / STAGE_ZERO);
+  return (los - dD) / dist; // MIL (positivo = alzata)
+}
+
+// windDir "R" = vento da sinistra verso destra → proiettile deviato a destra → correzione ←
+// windDir "L" = vento da destra verso sinistra → proiettile deviato a sinistra → correzione →
+function stageWindMIL(dist, windSpeed){
+  if(dist < 5 || windSpeed <= 0) return 0;
+  const tof = dist / (STAGE_V0 * 0.72);
+  const lag = (dist / STAGE_V0) - tof;
+  return lag * 1000 / dist * windSpeed; // MIL
+}
+
+// ── Quadrante direzione vento (60×60px) ──────────────────────
+// angle: 0=Nord (vento in faccia), 90=Est (da destra), 270=Ovest (da sinistra)
+function WindDial({angle, onChange, disabled}){
+  const dRef = useRef(null);
+  const dragging = useRef(false);
+
+  useEffect(()=>{
+    const cv = dRef.current; if(!cv) return;
+    const ctx = cv.getContext("2d");
+    const cx=30, cy=30, r=27;
+    ctx.clearRect(0,0,60,60);
+
+    // Cerchio
+    ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2);
+    ctx.fillStyle="#0D1117"; ctx.fill();
+    ctx.strokeStyle=disabled?"#333":"#1D9E75"; ctx.lineWidth=1.5; ctx.stroke();
+
+    // Tacche cardinali
+    for(let a=0;a<360;a+=45){
+      const rd=a*Math.PI/180, inner=a%90===0?r-5:r-3;
+      ctx.beginPath();
+      ctx.moveTo(cx+Math.sin(rd)*inner, cy-Math.cos(rd)*inner);
+      ctx.lineTo(cx+Math.sin(rd)*(r-1), cy-Math.cos(rd)*(r-1));
+      ctx.strokeStyle="#444"; ctx.lineWidth=1; ctx.stroke();
+    }
+
+    // Freccia verso la direzione di origine del vento
+    const rd=angle*Math.PI/180;
+    const tipX=cx+Math.sin(rd)*(r-5);
+    const tipY=cy-Math.cos(rd)*(r-5);
+    const ha=Math.atan2(tipY-cy, tipX-cx);
+    ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(tipX,tipY);
+    ctx.strokeStyle=disabled?"#444":"#1D9E75"; ctx.lineWidth=2.5; ctx.lineCap="round"; ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(tipX,tipY);
+    ctx.lineTo(tipX-7*Math.cos(ha-0.4), tipY-7*Math.sin(ha-0.4));
+    ctx.lineTo(tipX-7*Math.cos(ha+0.4), tipY-7*Math.sin(ha+0.4));
+    ctx.closePath(); ctx.fillStyle=disabled?"#444":"#1D9E75"; ctx.fill();
+
+    // Etichetta N
+    ctx.fillStyle="#555"; ctx.font="bold 8px sans-serif";
+    ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.fillText("N", cx, cy-r+7);
+
+    // Punto centrale
+    ctx.beginPath(); ctx.arc(cx,cy,2,0,Math.PI*2);
+    ctx.fillStyle="#FFFFFF"; ctx.fill();
+  }, [angle, disabled]);
+
+  const calcAngle = (clientX, clientY) => {
+    const rect = dRef.current.getBoundingClientRect();
+    const dx = clientX-(rect.left+30), dy = clientY-(rect.top+30);
+    return Math.round((Math.atan2(dx,-dy)*180/Math.PI+360)%360);
+  };
+  const onStart = (e)=>{
+    if(disabled) return; e.preventDefault();
+    dragging.current=true;
+    const t=e.touches?.[0]??e; onChange(calcAngle(t.clientX,t.clientY));
+  };
+  const onMove = (e)=>{
+    if(!dragging.current) return; e.preventDefault();
+    const t=e.touches?.[0]??e; onChange(calcAngle(t.clientX,t.clientY));
+  };
+  useEffect(()=>{
+    const stop=()=>{dragging.current=false;};
+    window.addEventListener("mouseup",stop); window.addEventListener("touchend",stop);
+    return ()=>{ window.removeEventListener("mouseup",stop); window.removeEventListener("touchend",stop); };
+  },[]);
+
+  return <canvas ref={dRef} width={60} height={60}
+    style={{cursor:disabled?"default":"crosshair",display:"block",touchAction:"none",flexShrink:0}}
+    onMouseDown={onStart} onMouseMove={onMove}
+    onTouchStart={onStart} onTouchMove={onMove}/>;
+}
+
+function StageTab({s, devices}){
+  const [stageName, setStageName] = useState("Stage 1");
+  const [positions, setPositions] = useState([]);
+  // windAngle: 0=Nord/faccia, 90=Est/destra, 180=Sud/coda, 270=Ovest/sinistra
+  const [form, setForm] = useState({target:"", dist:"", wind:"", windAngle:90});
+  const canvasRef = useRef(null);
+
+  // ── Sorgente vento (priorità: SIM > Calypso > Manuale)
+  const simActive    = s?.sim ?? false;
+  const calypsoConn  = devices?.find(d=>d.id==="calypso")?.connected ?? false;
+  const sensorActive = simActive || calypsoConn;
+
+  // Vento trasversale effettivo dal sensore
+  let sensorWindSpeed=0, sensorWindDir="R";
+  if(sensorActive && s){
+    const wAbs=(s.windDir+s.calHdg)%360;
+    const wRel=((wAbs-s.riflHdg)+360)%360;
+    const cw=s.windSpd*Math.sin(wRel*Math.PI/180);
+    sensorWindSpeed=parseFloat(Math.abs(cw).toFixed(2));
+    sensorWindDir=cw>=0?"R":"L";
+  }
+
+  // Vento manuale dal quadrante:
+  // cw = -speed * sin(angle) dove angle=0°(Nord)=faccia, 90°(Est)=da destra
+  // cw>0 → proiettile a destra (dir "R") → correzione ←
+  // cw<0 → proiettile a sinistra (dir "L") → correzione →
+  const manualSpeed = parseFloat(form.wind)||0;
+  const manualCw    = -manualSpeed*Math.sin(form.windAngle*Math.PI/180);
+  const manualWindDir      = manualCw>=0?"R":"L";
+  const manualWindEffective= parseFloat(Math.abs(manualCw).toFixed(2));
+
+  const activeWindSpeed = sensorActive ? sensorWindSpeed : manualWindEffective;
+  const activeWindDir   = sensorActive ? sensorWindDir   : manualWindDir;
+
+  // Angolo da mostrare nel quadrante (sensor: approssimazione visiva)
+  const dialAngle = sensorActive ? (sensorWindDir==="L"?90:270) : form.windAngle;
+
+  const windSourceLabel = simActive?"SIM":calypsoConn?"Calypso":"Manuale";
+  const windStatusArrow = sensorActive?(activeWindDir==="R"?"→":"←"):null;
+
+  const addPosition = () => {
+    if(positions.length>=15) return;
+    const d=parseFloat(form.dist);
+    if(!form.target.trim()||isNaN(d)||d<5||d>500) return;
+    const mil    =stageDropMIL(d);
+    const windMil=stageWindMIL(d,activeWindSpeed);
+    setPositions(prev=>[...prev,{
+      id:Date.now(), pos:prev.length+1,
+      target:form.target.trim(), dist:d, mil,
+      windSpeed:activeWindSpeed, windDir:activeWindDir, windMil
+    }]);
+    setForm(f=>({target:"",dist:"",wind:"",windAngle:f.windAngle}));
+  };
+
+  const removePosition = (id)=>{
+    setPositions(prev=>prev.filter(p=>p.id!==id).map((p,i)=>({...p,pos:i+1})));
+  };
+
+  // Canvas preview 2x (352×528) → display 176×264
+  // Colonne a 2x: P=28 | T=124 | m=56 | MIL=72 | VENTO=72 → tot=352
+  // Header 48px@2x (24px@1x) | 15 righe × 32px@2x (16px@1x) = 480px → tot 528
+  useEffect(()=>{
+    const c=canvasRef.current; if(!c) return;
+    const ctx=c.getContext("2d");
+    const W=352,H=528;
+    const xP=0,wP=28, xT=28,wT=124, xm=152,wm=56, xMIL=208,wMIL=72, xV=280,wV=72;
+    const PAD=6, HDR=48, ROW=32; // 15×32=480, 48+480=528 ✓
+
+    ctx.save(); ctx.textBaseline="middle";
+    ctx.fillStyle="#FFFFFF"; ctx.fillRect(0,0,W,H);
+
+    // Header (nero, due righe)
+    ctx.fillStyle="#000000"; ctx.fillRect(0,0,W,HDR);
+    ctx.fillStyle="#FFFFFF";
+    ctx.font="bold 20px monospace"; ctx.textAlign="center";
+    ctx.fillText("RANGE CARD — "+stageName.toUpperCase().slice(0,18), W/2, 13);
+    ctx.font="bold 16px monospace";
+    ctx.textAlign="center";
+    ctx.fillText("P", xP+wP/2, 36);
+    ctx.textAlign="left";  ctx.fillText("BERSAG.", xT+PAD,        36);
+    ctx.textAlign="right"; ctx.fillText("m",    xm+wm-PAD,     36);
+    ctx.fillText("MIL",   xMIL+wMIL-PAD, 36);
+    ctx.fillText("VENTO", xV+wV-PAD,     36);
+    ctx.fillStyle="#FFFFFF"; ctx.fillRect(0,HDR-2,W,2);
+
+    // 15 righe dati — font 9px@1x → 18px@2x
+    for(let i=0;i<15;i++){
+      const y=HDR+i*ROW;
+      const row=positions[i];
+      if(i%2===0){ ctx.fillStyle="#F0F0F0"; ctx.fillRect(xT,y,W-xT,ROW); }
+
+      // Colonna P (nero pieno)
+      ctx.fillStyle="#000000"; ctx.fillRect(xP,y,wP,ROW);
+      ctx.fillStyle="#FFFFFF"; ctx.font="bold 18px monospace"; ctx.textAlign="center";
+      ctx.fillText(row?String(row.pos):"—", xP+wP/2, y+ROW/2);
+
+      if(row){
+        ctx.fillStyle="#000000"; ctx.font="18px monospace"; ctx.textAlign="left";
+        const nm=row.target.length>9?row.target.slice(0,9)+"…":row.target;
+        ctx.fillText(nm, xT+PAD, y+ROW/2);
+        ctx.textAlign="right";
+        ctx.fillText(String(row.dist), xm+wm-PAD, y+ROW/2);
+        ctx.font="bold 18px monospace";
+        ctx.fillText(row.mil.toFixed(2), xMIL+wMIL-PAD, y+ROW/2);
+        const liveMil=stageWindMIL(row.dist,activeWindSpeed);
+        const wStr=activeWindSpeed>0
+          ?`${activeWindDir==="R"?"←":"→"}${Math.abs(liveMil).toFixed(1)}`:"—";
+        ctx.fillText(wStr, xV+wV-PAD, y+ROW/2);
+      } else {
+        ctx.fillStyle="#AAAAAA"; ctx.font="18px monospace"; ctx.textAlign="left";
+        ctx.fillText("—", xT+PAD, y+ROW/2);
+        ctx.textAlign="right";
+        ctx.fillText("—", xm+wm-PAD, y+ROW/2);
+        ctx.font="bold 18px monospace";
+        ctx.fillText("—", xMIL+wMIL-PAD, y+ROW/2);
+        ctx.fillText("—", xV+wV-PAD, y+ROW/2);
+      }
+      ctx.fillStyle="#CCCCCC"; ctx.fillRect(xT,y+ROW-1,W-xT,1);
+    }
+    ctx.strokeStyle="#000000"; ctx.lineWidth=2;
+    ctx.strokeRect(1,1,W-2,H-2);
+    ctx.restore();
+  }, [positions, stageName, activeWindSpeed, activeWindDir]);
+
+  const exportPNG = ()=>{
+    const FW=176,FH=264;
+    const out=document.createElement("canvas");
+    out.width=FW; out.height=FH;
+    const outCtx=out.getContext("2d");
+    outCtx.imageSmoothingEnabled=false;
+    outCtx.drawImage(canvasRef.current,0,0,FW,FH);
+    const img=outCtx.getImageData(0,0,FW,FH);
+    for(let p=0;p<FW*FH;p++){
+      const gray=(img.data[p*4]*299+img.data[p*4+1]*587+img.data[p*4+2]*114)/1000;
+      const v=gray>=128?255:0;
+      img.data[p*4]=img.data[p*4+1]=img.data[p*4+2]=v; img.data[p*4+3]=255;
+    }
+    outCtx.putImageData(img,0,0);
+    const a=document.createElement("a");
+    a.download="zerodot-stage.png"; a.href=out.toDataURL("image/png"); a.click();
+  };
+
+  const iS={padding:"7px 9px",background:C.card,border:`1px solid ${C.border}`,
+    borderRadius:6,color:C.white,fontSize:13,fontFamily:"inherit",outline:"none",
+    boxSizing:"border-box"};
+
+  return (
+    <div style={{padding:"12px 14px",maxWidth:480,margin:"0 auto",
+      display:"flex",flexDirection:"column",gap:10}}>
+
+      {/* 1. Nome stage */}
+      <input value={stageName} onChange={e=>setStageName(e.target.value)}
+        style={{...iS,width:"100%",fontWeight:700}} placeholder="Nome stage"/>
+
+      {/* Barra stato sorgente vento */}
+      <div style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",
+        borderRadius:6,background:sensorActive?`${C.amber}11`:C.card,
+        border:`1px solid ${sensorActive?C.amber:C.border}`}}>
+        <span style={{fontSize:12}}>🌬</span>
+        {sensorActive?(
+          <span style={{fontSize:12,fontWeight:700,color:C.amber,fontFamily:"monospace"}}>
+            {windSourceLabel}: {activeWindSpeed.toFixed(1)} m/s {windStatusArrow}
+          </span>
+        ):(
+          <span style={{fontSize:12,color:C.muted}}>
+            Manuale — {form.windAngle}° ({
+              form.windAngle<22.5||form.windAngle>=337.5?"N":
+              form.windAngle<67.5?"NE":form.windAngle<112.5?"E":
+              form.windAngle<157.5?"SE":form.windAngle<202.5?"S":
+              form.windAngle<247.5?"SO":form.windAngle<292.5?"O":"NO"
+            })
+          </span>
+        )}
+      </div>
+
+      {/* 2. Form su una riga + quadrante */}
+      <div style={{display:"flex",gap:5,alignItems:"center"}}>
+        <input value={form.target} onChange={e=>setForm(f=>({...f,target:e.target.value}))}
+          onKeyDown={e=>e.key==="Enter"&&addPosition()}
+          style={{...iS,flex:1,minWidth:0}} placeholder="Bersaglio"/>
+        <input type="number" value={form.dist}
+          onChange={e=>setForm(f=>({...f,dist:e.target.value}))}
+          onKeyDown={e=>e.key==="Enter"&&addPosition()}
+          style={{...iS,width:54}} placeholder="m" min={5} max={500}/>
+        <input type="number"
+          value={sensorActive?activeWindSpeed.toFixed(1):form.wind}
+          onChange={e=>!sensorActive&&setForm(f=>({...f,wind:e.target.value}))}
+          onKeyDown={e=>e.key==="Enter"&&addPosition()}
+          readOnly={sensorActive}
+          style={{...iS,width:50,color:sensorActive?C.muted:C.white,
+            background:sensorActive?C.card2:C.card,
+            cursor:sensorActive?"default":"text"}}
+          placeholder="m/s" min={0} max={20} step={0.5}/>
+        {/* Quadrante direzione vento */}
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:2,flexShrink:0}}>
+          <WindDial
+            angle={dialAngle}
+            onChange={a=>!sensorActive&&setForm(f=>({...f,windAngle:a}))}
+            disabled={sensorActive}/>
+          <span style={{fontSize:9,color:sensorActive?C.muted:C.amber,
+            fontFamily:"monospace",lineHeight:1}}>
+            {sensorActive?"sensor":`${dialAngle}°`}
+          </span>
+        </div>
+        <button onClick={addPosition} disabled={positions.length>=15}
+          style={{padding:"7px 12px",flexShrink:0,
+            background:positions.length<15?`${C.green}22`:"transparent",
+            border:`1px solid ${positions.length<15?C.green:C.border}`,
+            borderRadius:6,color:positions.length<15?C.green:C.muted,
+            fontSize:16,fontWeight:800,cursor:"pointer",lineHeight:1}}>
+          +
+        </button>
+      </div>
+
+      {/* 3. Lista posizioni compatta */}
+      <div style={{display:"flex",flexDirection:"column",gap:3}}>
+        {positions.length===0
+          ?<div style={{color:C.muted,fontSize:11,padding:"8px 10px",textAlign:"center",
+              border:`1px dashed ${C.border}`,borderRadius:6}}>
+              Nessuna posizione — 0/15
+            </div>
+          :positions.map(p=>{
+              const wPart=p.windSpeed>0?` · ${p.windDir==="R"?"←":"→"}${p.windMil.toFixed(1)}`:"";
+              return(
+                <div key={p.id} style={{display:"flex",alignItems:"center",gap:8,
+                  background:C.card,border:`1px solid ${C.border}`,borderRadius:6,
+                  padding:"5px 10px"}}>
+                  <span style={{fontFamily:"monospace",fontSize:12,flex:1,
+                    overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:C.white}}>
+                    <span style={{color:C.green,fontWeight:800}}>{p.pos}</span>
+                    <span style={{color:C.muted}}> · </span>{p.target}
+                    <span style={{color:C.muted}}> · {p.dist}m · </span>
+                    <span style={{color:C.greenL,fontWeight:700}}>{p.mil.toFixed(2)}MIL</span>
+                    {p.windSpeed>0&&<span style={{color:C.amber}}>{wPart}</span>}
+                  </span>
+                  <button onClick={()=>removePosition(p.id)}
+                    style={{padding:"2px 7px",background:"transparent",flexShrink:0,
+                      border:`1px solid ${C.border}`,borderRadius:4,
+                      color:C.red,fontSize:10,cursor:"pointer"}}>✕</button>
+                </div>
+              );
+            })
+        }
+        {positions.length>0&&
+          <div style={{fontSize:10,color:C.muted,textAlign:"right"}}>
+            {positions.length}/15
+          </div>}
+      </div>
+
+      {/* 4. Anteprima e-Paper portrait 176×264 */}
+      <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
+        <span style={{fontSize:10,fontWeight:700,color:C.muted,
+          textTransform:"uppercase",letterSpacing:1}}>
+          Anteprima e-Paper 2.7" · 176×264
+        </span>
+        <canvas ref={canvasRef} width={352} height={528}
+          style={{width:176,height:264,border:`1px solid ${C.border}`,borderRadius:4,
+            imageRendering:"pixelated",display:"block",flexShrink:0}}/>
+      </div>
+
+      {/* 5. Esporta PNG full width */}
+      <button onClick={exportPNG}
+        style={{width:"100%",padding:"11px",background:`${C.green}22`,
+          border:`1px solid ${C.green}`,borderRadius:8,
+          color:C.green,fontSize:13,fontWeight:800,cursor:"pointer",letterSpacing:1}}>
+        ⬇ ESPORTA PNG
+      </button>
+      <div style={{fontSize:9,color:C.muted,textAlign:"center",lineHeight:1.5}}>
+        Lapua SLR · BC G1 0.200 · V0 330 m/s · Zero 50m · 15°C / 1013 hPa
+      </div>
+    </div>
+  );
+}
+
 function GaraTab({ profile, s }) {
   const [view, setView] = useState("setup");
   const [matchName, setMatchName] = useState("PRS Rimfire 2026");
@@ -2173,8 +2542,11 @@ ${dot?`DOT: DROP=${dot.dropMil.toFixed(3)}MIL(${dot.dropMoa.toFixed(2)}MOA) WIND
 
 // ─── APP PRINCIPALE con Auth ──────────────────────────────────
 export default function ZeroDotApp(){
-  const [session, setSession] = useState(null);
-  const [authLoading, setAuthLoading] = useState(true);
+  const [session, setSession] = useState(() => {
+    const s = lsGet("zerodot_session");
+    return (s && s.userId && s.username) ? s : null;
+  });
+
   const [tab,setTab]=useState("HUD");
   const [profiles,setProfiles]=useState(DEFAULT_PROFILES);
   const [activeId,setActiveId]=useState("slr");
@@ -2193,14 +2565,6 @@ export default function ZeroDotApp(){
 
   const hasUpdates = DEVICE_TYPES.some(t=>t.version && t.version.latest!==t.version.current);
   const connectedDevices = devices.filter(d=>d.connected);
-
-  // Check session on mount
-  useEffect(()=>{
-    loadSession().then(sess=>{
-      if(sess) setSession(sess);
-      setAuthLoading(false);
-    });
-  },[]);
 
   // Load profiles per-user
   useEffect(()=>{
@@ -2235,17 +2599,9 @@ export default function ZeroDotApp(){
     setDeleteConfirm(null);
   };
 
-  if(authLoading) return (
-    <div style={{minHeight:"100vh",background:C.dark,display:"flex",alignItems:"center",
-      justifyContent:"center",flexDirection:"column",gap:20}}>
-      <img src={ICON_SRC} alt="ZERO-DOT" style={{width:80,opacity:0.7}}/>
-      <div style={{color:C.green,fontFamily:"monospace",fontSize:12,letterSpacing:3}}>LOADING...</div>
-    </div>
-  );
-
   if(!session) return <AuthScreen onLogin={handleLogin}/>;
 
-  const tabs=["HUD","Profili","Sensori","Log","Gara","Dispositivi","AI"];
+  const tabs=["HUD","Profili","Sensori","Log","Gara","Stage","Dispositivi","AI"];
 
   return (
     <div style={{background:C.dark,minHeight:"100vh",color:C.white,
@@ -2353,6 +2709,7 @@ export default function ZeroDotApp(){
       {tab==="Gara"        &&<GaraTab profile={profile} s={s}/>}
       {tab==="Dispositivi" &&<DispositiviTab devices={devices} setDevices={setDevices}
                                sessionPin={sessionPin} setSessionPin={setSessionPin}/>}
+      {tab==="Stage"       &&<StageTab s={s} devices={devices}/>}
       {tab==="AI"          &&<AITab s={s} profile={profile}/>}
     </div>
   );
