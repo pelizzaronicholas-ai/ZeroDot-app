@@ -1765,375 +1765,6 @@ const DEFAULT_STAGES = [
   {id:5,name:"Stage 5",targets:5,maxShots:10,maxTime:120},
 ];
 
-// ─── STAGE BUILDER TAB ──────────────────────────────────────
-const STAGE_BC = 0.200, STAGE_V0 = 330, STAGE_SCOPE_MM = 65, STAGE_ZERO = 50;
-
-function stageDropMIL(dist){
-  if(dist < 5) return 0;
-  const dD = solveDrop(dist,       STAGE_V0, STAGE_BC, 15, 1013, 50);
-  const dZ = solveDrop(STAGE_ZERO, STAGE_V0, STAGE_BC, 15, 1013, 50);
-  const los = STAGE_SCOPE_MM + (dZ - STAGE_SCOPE_MM) * (dist / STAGE_ZERO);
-  return (los - dD) / dist; // MIL (positivo = alzata)
-}
-
-// windDir "R" = vento da sinistra verso destra → proiettile deviato a destra → correzione ←
-// windDir "L" = vento da destra verso sinistra → proiettile deviato a sinistra → correzione →
-function stageWindMIL(dist, windSpeed){
-  if(dist < 5 || windSpeed <= 0) return 0;
-  const tof = dist / (STAGE_V0 * 0.72);
-  const lag = (dist / STAGE_V0) - tof;
-  return lag * 1000 / dist * windSpeed; // MIL
-}
-
-// ── Quadrante direzione vento (60×60px) ──────────────────────
-// angle: 0=Nord (vento in faccia), 90=Est (da destra), 270=Ovest (da sinistra)
-function WindDial({angle, onChange, disabled}){
-  const dRef = useRef(null);
-  const dragging = useRef(false);
-
-  useEffect(()=>{
-    const cv = dRef.current; if(!cv) return;
-    const ctx = cv.getContext("2d");
-    const cx=30, cy=30, r=27;
-    ctx.clearRect(0,0,60,60);
-
-    // Cerchio
-    ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2);
-    ctx.fillStyle="#0D1117"; ctx.fill();
-    ctx.strokeStyle=disabled?"#333":"#1D9E75"; ctx.lineWidth=1.5; ctx.stroke();
-
-    // Tacche cardinali
-    for(let a=0;a<360;a+=45){
-      const rd=a*Math.PI/180, inner=a%90===0?r-5:r-3;
-      ctx.beginPath();
-      ctx.moveTo(cx+Math.sin(rd)*inner, cy-Math.cos(rd)*inner);
-      ctx.lineTo(cx+Math.sin(rd)*(r-1), cy-Math.cos(rd)*(r-1));
-      ctx.strokeStyle="#444"; ctx.lineWidth=1; ctx.stroke();
-    }
-
-    // Freccia verso la direzione di origine del vento
-    const rd=angle*Math.PI/180;
-    const tipX=cx+Math.sin(rd)*(r-5);
-    const tipY=cy-Math.cos(rd)*(r-5);
-    const ha=Math.atan2(tipY-cy, tipX-cx);
-    ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(tipX,tipY);
-    ctx.strokeStyle=disabled?"#444":"#1D9E75"; ctx.lineWidth=2.5; ctx.lineCap="round"; ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(tipX,tipY);
-    ctx.lineTo(tipX-7*Math.cos(ha-0.4), tipY-7*Math.sin(ha-0.4));
-    ctx.lineTo(tipX-7*Math.cos(ha+0.4), tipY-7*Math.sin(ha+0.4));
-    ctx.closePath(); ctx.fillStyle=disabled?"#444":"#1D9E75"; ctx.fill();
-
-    // Etichetta N
-    ctx.fillStyle="#555"; ctx.font="bold 8px sans-serif";
-    ctx.textAlign="center"; ctx.textBaseline="middle";
-    ctx.fillText("N", cx, cy-r+7);
-
-    // Punto centrale
-    ctx.beginPath(); ctx.arc(cx,cy,2,0,Math.PI*2);
-    ctx.fillStyle="#FFFFFF"; ctx.fill();
-  }, [angle, disabled]);
-
-  const calcAngle = (clientX, clientY) => {
-    const rect = dRef.current.getBoundingClientRect();
-    const dx = clientX-(rect.left+30), dy = clientY-(rect.top+30);
-    return Math.round((Math.atan2(dx,-dy)*180/Math.PI+360)%360);
-  };
-  const onStart = (e)=>{
-    if(disabled) return; e.preventDefault();
-    dragging.current=true;
-    const t=e.touches?.[0]??e; onChange(calcAngle(t.clientX,t.clientY));
-  };
-  const onMove = (e)=>{
-    if(!dragging.current) return; e.preventDefault();
-    const t=e.touches?.[0]??e; onChange(calcAngle(t.clientX,t.clientY));
-  };
-  useEffect(()=>{
-    const stop=()=>{dragging.current=false;};
-    window.addEventListener("mouseup",stop); window.addEventListener("touchend",stop);
-    return ()=>{ window.removeEventListener("mouseup",stop); window.removeEventListener("touchend",stop); };
-  },[]);
-
-  return <canvas ref={dRef} width={60} height={60}
-    style={{cursor:disabled?"default":"crosshair",display:"block",touchAction:"none",flexShrink:0}}
-    onMouseDown={onStart} onMouseMove={onMove}
-    onTouchStart={onStart} onTouchMove={onMove}/>;
-}
-
-function StageTab({s, devices}){
-  const [stageName, setStageName] = useState("Stage 1");
-  const [positions, setPositions] = useState([]);
-  // windAngle: 0=Nord/faccia, 90=Est/destra, 180=Sud/coda, 270=Ovest/sinistra
-  const [form, setForm] = useState({target:"", dist:"", wind:"", windAngle:90});
-  const canvasRef = useRef(null);
-
-  // ── Sorgente vento (priorità: SIM > Calypso > Manuale)
-  const simActive    = s?.sim ?? false;
-  const calypsoConn  = devices?.find(d=>d.id==="calypso")?.connected ?? false;
-  const sensorActive = simActive || calypsoConn;
-
-  // Vento trasversale effettivo dal sensore
-  let sensorWindSpeed=0, sensorWindDir="R";
-  if(sensorActive && s){
-    const wAbs=(s.windDir+s.calHdg)%360;
-    const wRel=((wAbs-s.riflHdg)+360)%360;
-    const cw=s.windSpd*Math.sin(wRel*Math.PI/180);
-    sensorWindSpeed=parseFloat(Math.abs(cw).toFixed(2));
-    sensorWindDir=cw>=0?"R":"L";
-  }
-
-  // Vento manuale dal quadrante:
-  // cw = -speed * sin(angle) dove angle=0°(Nord)=faccia, 90°(Est)=da destra
-  // cw>0 → proiettile a destra (dir "R") → correzione ←
-  // cw<0 → proiettile a sinistra (dir "L") → correzione →
-  const manualSpeed = parseFloat(form.wind)||0;
-  const manualCw    = -manualSpeed*Math.sin(form.windAngle*Math.PI/180);
-  const manualWindDir      = manualCw>=0?"R":"L";
-  const manualWindEffective= parseFloat(Math.abs(manualCw).toFixed(2));
-
-  const activeWindSpeed = sensorActive ? sensorWindSpeed : manualWindEffective;
-  const activeWindDir   = sensorActive ? sensorWindDir   : manualWindDir;
-
-  // Angolo da mostrare nel quadrante (sensor: approssimazione visiva)
-  const dialAngle = sensorActive ? (sensorWindDir==="L"?90:270) : form.windAngle;
-
-  const windSourceLabel = simActive?"SIM":calypsoConn?"Calypso":"Manuale";
-  const windStatusArrow = sensorActive?(activeWindDir==="R"?"→":"←"):null;
-
-  const addPosition = () => {
-    if(positions.length>=15) return;
-    const d=parseFloat(form.dist);
-    if(!form.target.trim()||isNaN(d)||d<5||d>500) return;
-    const mil    =stageDropMIL(d);
-    const windMil=stageWindMIL(d,activeWindSpeed);
-    setPositions(prev=>[...prev,{
-      id:Date.now(), pos:prev.length+1,
-      target:form.target.trim(), dist:d, mil,
-      windSpeed:activeWindSpeed, windDir:activeWindDir, windMil
-    }]);
-    setForm(f=>({target:"",dist:"",wind:"",windAngle:f.windAngle}));
-  };
-
-  const removePosition = (id)=>{
-    setPositions(prev=>prev.filter(p=>p.id!==id).map((p,i)=>({...p,pos:i+1})));
-  };
-
-  // Canvas preview 2x (352×528) → display 176×264
-  // Colonne a 2x: P=28 | T=124 | m=56 | MIL=72 | VENTO=72 → tot=352
-  // Header 48px@2x (24px@1x) | 15 righe × 32px@2x (16px@1x) = 480px → tot 528
-  useEffect(()=>{
-    const c=canvasRef.current; if(!c) return;
-    const ctx=c.getContext("2d");
-    const W=352,H=528;
-    const xP=0,wP=28, xT=28,wT=124, xm=152,wm=56, xMIL=208,wMIL=72, xV=280,wV=72;
-    const PAD=6, HDR=48, ROW=32; // 15×32=480, 48+480=528 ✓
-
-    ctx.save(); ctx.textBaseline="middle";
-    ctx.fillStyle="#FFFFFF"; ctx.fillRect(0,0,W,H);
-
-    // Header (nero, due righe)
-    ctx.fillStyle="#000000"; ctx.fillRect(0,0,W,HDR);
-    ctx.fillStyle="#FFFFFF";
-    ctx.font="bold 20px monospace"; ctx.textAlign="center";
-    ctx.fillText("RANGE CARD — "+stageName.toUpperCase().slice(0,18), W/2, 13);
-    ctx.font="bold 16px monospace";
-    ctx.textAlign="center";
-    ctx.fillText("P", xP+wP/2, 36);
-    ctx.textAlign="left";  ctx.fillText("BERSAG.", xT+PAD,        36);
-    ctx.textAlign="right"; ctx.fillText("m",    xm+wm-PAD,     36);
-    ctx.fillText("MIL",   xMIL+wMIL-PAD, 36);
-    ctx.fillText("VENTO", xV+wV-PAD,     36);
-    ctx.fillStyle="#FFFFFF"; ctx.fillRect(0,HDR-2,W,2);
-
-    // 15 righe dati — font 9px@1x → 18px@2x
-    for(let i=0;i<15;i++){
-      const y=HDR+i*ROW;
-      const row=positions[i];
-      if(i%2===0){ ctx.fillStyle="#F0F0F0"; ctx.fillRect(xT,y,W-xT,ROW); }
-
-      // Colonna P (nero pieno)
-      ctx.fillStyle="#000000"; ctx.fillRect(xP,y,wP,ROW);
-      ctx.fillStyle="#FFFFFF"; ctx.font="bold 18px monospace"; ctx.textAlign="center";
-      ctx.fillText(row?String(row.pos):"—", xP+wP/2, y+ROW/2);
-
-      if(row){
-        ctx.fillStyle="#000000"; ctx.font="18px monospace"; ctx.textAlign="left";
-        const nm=row.target.length>9?row.target.slice(0,9)+"…":row.target;
-        ctx.fillText(nm, xT+PAD, y+ROW/2);
-        ctx.textAlign="right";
-        ctx.fillText(String(row.dist), xm+wm-PAD, y+ROW/2);
-        ctx.font="bold 18px monospace";
-        ctx.fillText(row.mil.toFixed(2), xMIL+wMIL-PAD, y+ROW/2);
-        const liveMil=stageWindMIL(row.dist,activeWindSpeed);
-        const wStr=activeWindSpeed>0
-          ?`${activeWindDir==="R"?"←":"→"}${Math.abs(liveMil).toFixed(1)}`:"—";
-        ctx.fillText(wStr, xV+wV-PAD, y+ROW/2);
-      } else {
-        ctx.fillStyle="#AAAAAA"; ctx.font="18px monospace"; ctx.textAlign="left";
-        ctx.fillText("—", xT+PAD, y+ROW/2);
-        ctx.textAlign="right";
-        ctx.fillText("—", xm+wm-PAD, y+ROW/2);
-        ctx.font="bold 18px monospace";
-        ctx.fillText("—", xMIL+wMIL-PAD, y+ROW/2);
-        ctx.fillText("—", xV+wV-PAD, y+ROW/2);
-      }
-      ctx.fillStyle="#CCCCCC"; ctx.fillRect(xT,y+ROW-1,W-xT,1);
-    }
-    ctx.strokeStyle="#000000"; ctx.lineWidth=2;
-    ctx.strokeRect(1,1,W-2,H-2);
-    ctx.restore();
-  }, [positions, stageName, activeWindSpeed, activeWindDir]);
-
-  const exportPNG = ()=>{
-    const FW=176,FH=264;
-    const out=document.createElement("canvas");
-    out.width=FW; out.height=FH;
-    const outCtx=out.getContext("2d");
-    outCtx.imageSmoothingEnabled=false;
-    outCtx.drawImage(canvasRef.current,0,0,FW,FH);
-    const img=outCtx.getImageData(0,0,FW,FH);
-    for(let p=0;p<FW*FH;p++){
-      const gray=(img.data[p*4]*299+img.data[p*4+1]*587+img.data[p*4+2]*114)/1000;
-      const v=gray>=128?255:0;
-      img.data[p*4]=img.data[p*4+1]=img.data[p*4+2]=v; img.data[p*4+3]=255;
-    }
-    outCtx.putImageData(img,0,0);
-    const a=document.createElement("a");
-    a.download="zerodot-stage.png"; a.href=out.toDataURL("image/png"); a.click();
-  };
-
-  const iS={padding:"7px 9px",background:C.card,border:`1px solid ${C.border}`,
-    borderRadius:6,color:C.white,fontSize:13,fontFamily:"inherit",outline:"none",
-    boxSizing:"border-box"};
-
-  return (
-    <div style={{padding:"12px 14px",maxWidth:480,margin:"0 auto",
-      display:"flex",flexDirection:"column",gap:10}}>
-
-      {/* 1. Nome stage */}
-      <input value={stageName} onChange={e=>setStageName(e.target.value)}
-        style={{...iS,width:"100%",fontWeight:700}} placeholder="Nome stage"/>
-
-      {/* Barra stato sorgente vento */}
-      <div style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",
-        borderRadius:6,background:sensorActive?`${C.amber}11`:C.card,
-        border:`1px solid ${sensorActive?C.amber:C.border}`}}>
-        <span style={{fontSize:12}}>🌬</span>
-        {sensorActive?(
-          <span style={{fontSize:12,fontWeight:700,color:C.amber,fontFamily:"monospace"}}>
-            {windSourceLabel}: {activeWindSpeed.toFixed(1)} m/s {windStatusArrow}
-          </span>
-        ):(
-          <span style={{fontSize:12,color:C.muted}}>
-            Manuale — {form.windAngle}° ({
-              form.windAngle<22.5||form.windAngle>=337.5?"N":
-              form.windAngle<67.5?"NE":form.windAngle<112.5?"E":
-              form.windAngle<157.5?"SE":form.windAngle<202.5?"S":
-              form.windAngle<247.5?"SO":form.windAngle<292.5?"O":"NO"
-            })
-          </span>
-        )}
-      </div>
-
-      {/* 2. Form su una riga + quadrante */}
-      <div style={{display:"flex",gap:5,alignItems:"center"}}>
-        <input value={form.target} onChange={e=>setForm(f=>({...f,target:e.target.value}))}
-          onKeyDown={e=>e.key==="Enter"&&addPosition()}
-          style={{...iS,flex:1,minWidth:0}} placeholder="Bersaglio"/>
-        <input type="number" value={form.dist}
-          onChange={e=>setForm(f=>({...f,dist:e.target.value}))}
-          onKeyDown={e=>e.key==="Enter"&&addPosition()}
-          style={{...iS,width:54}} placeholder="m" min={5} max={500}/>
-        <input type="number"
-          value={sensorActive?activeWindSpeed.toFixed(1):form.wind}
-          onChange={e=>!sensorActive&&setForm(f=>({...f,wind:e.target.value}))}
-          onKeyDown={e=>e.key==="Enter"&&addPosition()}
-          readOnly={sensorActive}
-          style={{...iS,width:50,color:sensorActive?C.muted:C.white,
-            background:sensorActive?C.card2:C.card,
-            cursor:sensorActive?"default":"text"}}
-          placeholder="m/s" min={0} max={20} step={0.5}/>
-        {/* Quadrante direzione vento */}
-        <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:2,flexShrink:0}}>
-          <WindDial
-            angle={dialAngle}
-            onChange={a=>!sensorActive&&setForm(f=>({...f,windAngle:a}))}
-            disabled={sensorActive}/>
-          <span style={{fontSize:9,color:sensorActive?C.muted:C.amber,
-            fontFamily:"monospace",lineHeight:1}}>
-            {sensorActive?"sensor":`${dialAngle}°`}
-          </span>
-        </div>
-        <button onClick={addPosition} disabled={positions.length>=15}
-          style={{padding:"7px 12px",flexShrink:0,
-            background:positions.length<15?`${C.green}22`:"transparent",
-            border:`1px solid ${positions.length<15?C.green:C.border}`,
-            borderRadius:6,color:positions.length<15?C.green:C.muted,
-            fontSize:16,fontWeight:800,cursor:"pointer",lineHeight:1}}>
-          +
-        </button>
-      </div>
-
-      {/* 3. Lista posizioni compatta */}
-      <div style={{display:"flex",flexDirection:"column",gap:3}}>
-        {positions.length===0
-          ?<div style={{color:C.muted,fontSize:11,padding:"8px 10px",textAlign:"center",
-              border:`1px dashed ${C.border}`,borderRadius:6}}>
-              Nessuna posizione — 0/15
-            </div>
-          :positions.map(p=>{
-              const wPart=p.windSpeed>0?` · ${p.windDir==="R"?"←":"→"}${p.windMil.toFixed(1)}`:"";
-              return(
-                <div key={p.id} style={{display:"flex",alignItems:"center",gap:8,
-                  background:C.card,border:`1px solid ${C.border}`,borderRadius:6,
-                  padding:"5px 10px"}}>
-                  <span style={{fontFamily:"monospace",fontSize:12,flex:1,
-                    overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:C.white}}>
-                    <span style={{color:C.green,fontWeight:800}}>{p.pos}</span>
-                    <span style={{color:C.muted}}> · </span>{p.target}
-                    <span style={{color:C.muted}}> · {p.dist}m · </span>
-                    <span style={{color:C.greenL,fontWeight:700}}>{p.mil.toFixed(2)}MIL</span>
-                    {p.windSpeed>0&&<span style={{color:C.amber}}>{wPart}</span>}
-                  </span>
-                  <button onClick={()=>removePosition(p.id)}
-                    style={{padding:"2px 7px",background:"transparent",flexShrink:0,
-                      border:`1px solid ${C.border}`,borderRadius:4,
-                      color:C.red,fontSize:10,cursor:"pointer"}}>✕</button>
-                </div>
-              );
-            })
-        }
-        {positions.length>0&&
-          <div style={{fontSize:10,color:C.muted,textAlign:"right"}}>
-            {positions.length}/15
-          </div>}
-      </div>
-
-      {/* 4. Anteprima e-Paper portrait 176×264 */}
-      <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
-        <span style={{fontSize:10,fontWeight:700,color:C.muted,
-          textTransform:"uppercase",letterSpacing:1}}>
-          Anteprima e-Paper 2.7" · 176×264
-        </span>
-        <canvas ref={canvasRef} width={352} height={528}
-          style={{width:176,height:264,border:`1px solid ${C.border}`,borderRadius:4,
-            imageRendering:"pixelated",display:"block",flexShrink:0}}/>
-      </div>
-
-      {/* 5. Esporta PNG full width */}
-      <button onClick={exportPNG}
-        style={{width:"100%",padding:"11px",background:`${C.green}22`,
-          border:`1px solid ${C.green}`,borderRadius:8,
-          color:C.green,fontSize:13,fontWeight:800,cursor:"pointer",letterSpacing:1}}>
-        ⬇ ESPORTA PNG
-      </button>
-      <div style={{fontSize:9,color:C.muted,textAlign:"center",lineHeight:1.5}}>
-        Lapua SLR · BC G1 0.200 · V0 330 m/s · Zero 50m · 15°C / 1013 hPa
-      </div>
-    </div>
-  );
-}
-
 function GaraTab({ profile, s }) {
   const [view, setView] = useState("setup");
   const [matchName, setMatchName] = useState("PRS Rimfire 2026");
@@ -2541,13 +2172,194 @@ ${dot?`DOT: DROP=${dot.dropMil.toFixed(3)}MIL(${dot.dropMoa.toFixed(2)}MOA) WIND
 // ─── APP ─────────────────────────────────────────────────────
 
 // ─── APP PRINCIPALE con Auth ──────────────────────────────────
-export default function ZeroDotApp(){
-  const [session, setSession] = useState(() => {
-    const s = lsGet("zerodot_session");
-    return (s && s.userId && s.username) ? s : null;
-  });
+// ─── LAYOUT C: HOME A MODULI + DOCK ACQUIRE ──────────────────
+const LILAC = "#9D96F0";
+const PINK  = "#E58AB8";
+const REDL  = "#FF6B6A";
 
-  const [tab,setTab]=useState("HUD");
+function Icon({name,size=22,color="currentColor"}){
+  const P={
+    hud:<><circle cx="12" cy="12" r="6"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/></>,
+    profili:<><path d="M9 21V11c0-3 1.5-6 3-8 1.5 2 3 5 3 8v10z"/><path d="M9 17h6"/></>,
+    sensori:<path d="M3 12h4l3-7 4 14 3-7h4"/>,
+    log:<path d="M5 6h14M5 12h14M5 18h9"/>,
+    gara:<><circle cx="12" cy="13" r="7"/><path d="M12 13V9M9 2h6M12 2v4"/></>,
+    dispositivi:<path d="M7 7l10 10-5 4V3l5 4L7 17"/>,
+    ai:<path d="M5 5h14v10H10l-5 4z"/>,
+    back:<path d="M15 6l-6 6 6 6"/>,
+  };
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color}
+      strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{P[name]}</svg>
+  );
+}
+
+// Dock sempre visibile: distanza + ACQUIRE da qualsiasi modulo
+function AcquireDock({s,profile,dot,acquire,confirmChange,setDist}){
+  const [d,setD]=useState("250");
+  const go=()=>{
+    if(s.confirm){confirmChange();return;}
+    const v=parseFloat(d);
+    if(v>=5&&v<=1200){setDist(v);acquire(v);}
+  };
+  return (
+    <div style={{position:"fixed",left:0,right:0,bottom:0,zIndex:20,background:C.mid,
+      borderTop:`1px solid ${C.border}`,padding:"8px 16px calc(10px + env(safe-area-inset-bottom))"}}>
+      <div style={{maxWidth:560,margin:"0 auto"}}>
+        {s.confirm?(
+          <div style={{fontSize:11,fontFamily:"monospace",color:C.amber,marginBottom:6}}>
+            Cambio bersaglio? {s.distance.toFixed(0)} m → {s.confirmDist.toFixed(0)} m — premi CONFERMA
+          </div>
+        ):dot?(
+          <div style={{display:"flex",gap:10,flexWrap:"wrap",fontSize:11,fontFamily:"monospace",marginBottom:6}}>
+            <span style={{color:REDL}}>● {s.distance.toFixed(0)} m</span>
+            <span style={{color:C.greenL}}>DROP {dot.dropMil.toFixed(2)}</span>
+            <span style={{color:C.amber}}>WIND {dot.windMil.toFixed(2)} MIL</span>
+          </div>
+        ):null}
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <label style={{display:"block",width:96,flexShrink:0}}>
+            <span style={{position:"absolute",width:1,height:1,overflow:"hidden",clip:"rect(0 0 0 0)"}}>Distanza in metri</span>
+            <input value={d} onChange={e=>setD(e.target.value)} inputMode="numeric"
+              onKeyDown={e=>{if(e.key==="Enter")go();}}
+              style={{boxSizing:"border-box",width:"100%",height:48,background:C.dark,
+                border:`1px solid ${C.border}`,borderRadius:12,color:C.white,
+                fontFamily:"monospace",fontSize:20,fontWeight:700,textAlign:"center"}}/>
+          </label>
+          <button onClick={go} style={{flex:1,height:48,display:"flex",alignItems:"center",
+            justifyContent:"center",gap:10,background:`${C.red}26`,border:`1.5px solid ${C.red}`,
+            borderRadius:12,color:REDL,fontSize:15,fontWeight:700,letterSpacing:1.5,cursor:"pointer"}}>
+            <Icon name="hud" size={20}/>{s.confirm?"CONFERMA":"ACQUIRE"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HomeTab({s,profile,devices,dot,setTab,profilesCount}){
+  const short={zerodot:"ZERO-DOT",calypso:"Calypso",remote:"Remote",zerotime:"ZERO TIME"};
+  const connected=devices.filter(d=>d.connected).length;
+  const fwUpdate=DEVICE_TYPES.some(t=>t.version&&t.version.latest!==t.version.current);
+
+  const tile=(id,label,sub,color,subColor)=>(
+    <button key={id} onClick={()=>setTab(id)} style={{position:"relative",display:"flex",
+      flexDirection:"column",justifyContent:"space-between",alignItems:"flex-start",width:"100%",
+      height:104,boxSizing:"border-box",padding:"12px 14px",background:C.card,
+      border:`1px solid ${C.border}`,borderRadius:16,color:C.white,fontFamily:"inherit",
+      textAlign:"left",cursor:"pointer"}}>
+      <span style={{display:"flex",alignItems:"center",justifyContent:"center",width:40,height:40,
+        borderRadius:12,background:`${color}24`,color}}><Icon name={id.toLowerCase()}/></span>
+      <span>
+        <span style={{display:"block",fontSize:16,fontWeight:600}}>{label}</span>
+        <span style={{display:"block",fontSize:12,color:subColor||C.muted}}>{sub}</span>
+      </span>
+      {id==="Dispositivi"&&fwUpdate&&(
+        <span style={{position:"absolute",top:12,right:12,width:8,height:8,borderRadius:"50%",background:C.amber}}/>
+      )}
+    </button>
+  );
+
+  return (
+    <div style={{maxWidth:560,margin:"0 auto",padding:"14px 16px",display:"flex",flexDirection:"column",gap:16}}>
+
+      {/* FASCIA DISPOSITIVI */}
+      <div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
+          <div style={{fontSize:10,letterSpacing:1.5,color:C.muted,textTransform:"uppercase"}}>Dispositivi</div>
+          <div style={{fontFamily:"monospace",fontSize:11,color:C.muted}}>{connected} / {devices.length} connessi</div>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,minmax(0,1fr))",gap:6}}>
+          {devices.map(d=>{
+            const t=DEVICE_TYPES.find(x=>x.id===d.id);
+            const upd=t&&t.version&&t.version.latest!==t.version.current;
+            return (
+              <button key={d.id} onClick={()=>setTab("Dispositivi")} style={{position:"relative",
+                display:"flex",flexDirection:"column",alignItems:"flex-start",gap:3,padding:"9px 8px",
+                background:C.mid,border:`1px solid ${d.connected?C.green:C.border}`,borderRadius:12,
+                color:C.white,fontFamily:"inherit",textAlign:"left",cursor:"pointer",minHeight:56,minWidth:0}}>
+                <span style={{fontSize:11,fontWeight:700,maxWidth:"100%",whiteSpace:"nowrap",
+                  overflow:"hidden",textOverflow:"ellipsis"}}>{d.customName||short[d.id]}</span>
+                <span style={{display:"flex",alignItems:"center",gap:5,fontSize:10,
+                  color:d.connected?C.greenL:C.muted}}>
+                  <span style={{display:"block",width:6,height:6,borderRadius:"50%",
+                    background:d.connected?C.greenL:"#4B5460"}}/>
+                  {d.connected?"connesso":"spento"}
+                </span>
+                {upd&&<span style={{position:"absolute",top:6,right:6,width:7,height:7,
+                  borderRadius:"50%",background:C.amber}}/>}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* PROFILO ATTIVO */}
+      <button onClick={()=>setTab("Profili")} style={{display:"flex",alignItems:"center",gap:12,
+        width:"100%",boxSizing:"border-box",minHeight:64,padding:"8px 14px",background:C.mid,
+        border:`1px solid ${C.border}`,borderRadius:14,color:C.offW,fontFamily:"inherit",
+        textAlign:"left",cursor:"pointer"}}>
+        <span style={{display:"block",width:10,height:10,borderRadius:"50%",background:profile.color||LILAC,flexShrink:0}}/>
+        <span style={{flex:1,minWidth:0,display:"flex",flexDirection:"column",gap:2}}>
+          <span style={{fontSize:10,letterSpacing:1.5,color:C.muted,textTransform:"uppercase"}}>Profilo attivo</span>
+          <span style={{fontSize:16,fontWeight:700,color:C.white}}>{profile.name}
+            <span style={{fontSize:12,fontWeight:500,color:C.muted}}> · {profile.drag} BC {profile.BC} · zero {profile.zero} m</span>
+          </span>
+        </span>
+        <span style={{textAlign:"right",fontFamily:"monospace"}}>
+          <span style={{display:"block",fontSize:18,fontWeight:700,color:C.blue}}>{interpolateV0(profile,s.temp).toFixed(0)}</span>
+          <span style={{display:"block",fontSize:10,color:C.muted}}>V0 m/s</span>
+        </span>
+      </button>
+
+      {/* GRIGLIA MODULI */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(2,minmax(0,1fr))",gap:12}}>
+
+        <button onClick={()=>setTab("HUD")} style={{gridColumn:"span 2",display:"flex",alignItems:"center",
+          justifyContent:"space-between",gap:12,height:120,boxSizing:"border-box",padding:14,
+          background:C.mid,border:`1.5px solid ${C.green}`,borderRadius:16,color:C.white,
+          fontFamily:"inherit",textAlign:"left",cursor:"pointer"}}>
+          <span style={{display:"flex",flexDirection:"column",justifyContent:"space-between",height:"100%",minWidth:0}}>
+            <span style={{display:"flex",alignItems:"center",justifyContent:"center",width:40,height:40,
+              borderRadius:12,background:`${C.green}2E`,color:C.greenL}}><Icon name="hud"/></span>
+            <span>
+              <span style={{display:"block",fontSize:20,fontWeight:700}}>HUD</span>
+              <span style={{display:"block",fontFamily:"monospace",fontSize:11,color:C.muted}}>
+                {dot?`${s.distance.toFixed(0)} m · ${dot.dropMil.toFixed(2)} · ${dot.windMil.toFixed(2)} MIL`:"ACQUIRE per iniziare"}
+              </span>
+            </span>
+          </span>
+          <span style={{display:"block",boxSizing:"border-box",width:150,flexShrink:0,
+            border:`1.5px solid ${C.green}`,borderRadius:8,overflow:"hidden"}}>
+            <svg width="147" height="73" viewBox="0 0 128 64" aria-hidden="true" style={{display:"block"}}>
+              <rect width="128" height="64" fill="#031A0D"/>
+              <path d="M16 0v64M32 0v64M48 0v64M80 0v64M96 0v64M112 0v64M0 8h128M0 16h128M0 24h128M0 40h128M0 48h128M0 56h128" stroke="#1D9E75" strokeOpacity="0.14" strokeWidth="0.3"/>
+              <path d="M64 0v64M0 32h128" stroke="#1D9E75" strokeWidth="0.6" strokeOpacity="0.9"/>
+              <circle cx="64" cy="32" r="3.6" fill="none" stroke="#1D9E75" strokeWidth="0.6" strokeOpacity="0.8"/>
+              {dot&&<>
+                <path d="M64 32L90 22" stroke="#E24B4A" strokeWidth="0.5" strokeDasharray="1.2 1.2" strokeOpacity="0.8"/>
+                <circle cx="90" cy="22" r="2.2" fill="#E24B4A"/>
+              </>}
+            </svg>
+          </span>
+        </button>
+
+        {tile("Profili","Profili",`${profilesCount} profili`,LILAC)}
+        {tile("Sensori","Sensori","LRF · IMU · Meteo · Vento",C.blue)}
+        {tile("Log","Log","Colpi · CSV · PDF",C.offW)}
+        {tile("Gara","Gara","Timer · stage · score",C.amber)}
+        {tile("Dispositivi","Dispositivi",fwUpdate?"Aggiornamento FW":"Tutti aggiornati",C.greenL,fwUpdate?C.amber:C.muted)}
+        {tile("AI","AI","Assistente balistico",PINK)}
+
+      </div>
+    </div>
+  );
+}
+
+export default function ZeroDotApp(){
+  const [session, setSession] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [tab,setTab]=useState("Home");
   const [profiles,setProfiles]=useState(DEFAULT_PROFILES);
   const [activeId,setActiveId]=useState("slr");
   const [modal,setModal]=useState(null);
@@ -2565,6 +2377,14 @@ export default function ZeroDotApp(){
 
   const hasUpdates = DEVICE_TYPES.some(t=>t.version && t.version.latest!==t.version.current);
   const connectedDevices = devices.filter(d=>d.connected);
+
+  // Check session on mount
+  useEffect(()=>{
+    loadSession().then(sess=>{
+      if(sess) setSession(sess);
+      setAuthLoading(false);
+    });
+  },[]);
 
   // Load profiles per-user
   useEffect(()=>{
@@ -2599,13 +2419,25 @@ export default function ZeroDotApp(){
     setDeleteConfirm(null);
   };
 
+  if(authLoading) return (
+    <div style={{minHeight:"100vh",background:C.dark,display:"flex",alignItems:"center",
+      justifyContent:"center",flexDirection:"column",gap:20}}>
+      <img src={ICON_SRC} alt="ZERO-DOT" style={{width:80,opacity:0.7}}/>
+      <div style={{color:C.green,fontFamily:"monospace",fontSize:12,letterSpacing:3}}>LOADING...</div>
+    </div>
+  );
+
   if(!session) return <AuthScreen onLogin={handleLogin}/>;
 
-  const tabs=["HUD","Profili","Sensori","Log","Gara","Stage","Dispositivi","AI"];
+  const isHome = tab==="Home";
+  // il dock ACQUIRE è nascosto nel HUD (ha già i suoi controlli) e nell'AI (campo di testo)
+  const showDock = tab!=="HUD" && tab!=="AI";
+  const dot = s.locked&&!s.confirm ? computeDot(profile,s) : null;
 
   return (
     <div style={{background:C.dark,minHeight:"100vh",color:C.white,
-      fontFamily:"-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",fontSize:13}}>
+      fontFamily:"-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",fontSize:13,
+      paddingBottom:showDock?(dot||s.confirm?128:96):0}}>
 
       {modal&&<ProfileModal profile={modal.profile||null} onSave={handleSave}
         onClose={()=>setModal(null)} currentTemp={s.temp}/>}
@@ -2629,75 +2461,71 @@ export default function ZeroDotApp(){
         </div>
       )}
 
-      {/* TOP BAR */}
-      <div style={{background:C.mid,borderBottom:`1px solid ${C.border}`,
-        padding:"6px 16px",display:"flex",alignItems:"center",gap:12,position:"sticky",top:0,zIndex:10}}>
-        <img src={ICON_SRC} alt="icon" style={{width:28,height:28,objectFit:"contain"}}/>
-        <img src={LOGO_SRC} alt="ZERO-DOT" style={{height:22,objectFit:"contain",opacity:0.92}}/>
-
-        <div style={{display:"flex",gap:4,flex:1,marginLeft:8}}>
-          {tabs.map(t=>(
-            <button key={t} onClick={()=>setTab(t)} style={{
-              padding:"5px 12px",borderRadius:6,
-              border:`1px solid ${tab===t?C.green:C.border}`,
-              background:tab===t?`${C.green}22`:"transparent",
-              color:tab===t?C.green:C.muted,fontSize:11,fontWeight:600,cursor:"pointer",position:"relative"}}>
-              {t}
-              {t==="Dispositivi"&&hasUpdates&&(
-                <span style={{position:"absolute",top:-4,right:-4,width:8,height:8,borderRadius:"50%",
-                  background:C.amber,boxShadow:`0 0 5px ${C.amber}`}}/>
-              )}
-            </button>
-          ))}
-        </div>
-
-        <div style={{display:"flex",gap:10,alignItems:"center"}}>
-          {/* FIRMWARE UPDATE BADGE */}
-          {hasUpdates&&(
-            <button onClick={()=>setTab("Dispositivi")} style={{
-              padding:"3px 8px",background:`${C.amber}22`,border:`1px solid ${C.amber}`,
-              borderRadius:5,color:C.amber,fontSize:10,fontWeight:700,cursor:"pointer"}}>
-              🔔 FW
-            </button>
-          )}
-          <div style={{display:"flex",gap:8,fontSize:10,color:C.muted}}>
-            {[{on:s.sim,label:"SIM",c:C.amber},{on:s.locked,label:"LRF",c:C.red},{on:connectedDevices.length>0,label:`BLE${connectedDevices.length>0?` (${connectedDevices.length})`:""}`,c:C.green}].map(({on,label,c})=>(
-              <div key={label} style={{display:"flex",alignItems:"center",gap:4}}>
-                <div style={{width:6,height:6,borderRadius:"50%",background:on?c:C.border,
-                  boxShadow:on?`0 0 5px ${c}`:"none",transition:"all .3s"}}/>
-                {label}
-              </div>
-            ))}
-          </div>
-          {/* USER BADGE + LOGOUT */}
-          <div style={{display:"flex",alignItems:"center",gap:8,borderLeft:`1px solid ${C.border}`,paddingLeft:10}}>
-            <div style={{width:26,height:26,borderRadius:"50%",background:`${C.green}22`,
-              border:`1px solid ${C.green}`,display:"flex",alignItems:"center",justifyContent:"center",
-              fontSize:11,fontWeight:800,color:C.green}}>
+      {/* HEADER — HOME: logo + stato + utente */}
+      {isHome&&(
+        <div style={{background:C.mid,borderBottom:`1px solid ${C.border}`,padding:"8px 16px",
+          display:"flex",alignItems:"center",gap:10,position:"sticky",top:0,zIndex:10}}>
+          <img src={LOGO_SRC} alt="ZERO-DOT" style={{height:30,objectFit:"contain",opacity:0.95}}/>
+          <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:8}}>
+            {hasUpdates&&(
+              <button onClick={()=>setTab("Dispositivi")} aria-label="Aggiornamento firmware disponibile" style={{
+                height:44,padding:"0 12px",background:`${C.amber}22`,border:`1px solid ${C.amber}`,
+                borderRadius:10,color:C.amber,fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                🔔 FW
+              </button>
+            )}
+            <div style={{display:"flex",gap:6}} aria-label="Stato: simulazione, telemetro, Bluetooth">
+              {[{on:s.sim,t:"SIM",c:C.amber},{on:s.locked,t:"LRF",c:C.red},{on:connectedDevices.length>0,t:"BLE",c:C.greenL}].map(({on,t,c})=>(
+                <span key={t} title={t} style={{width:8,height:8,borderRadius:"50%",background:on?c:C.border,
+                  boxShadow:on?`0 0 5px ${c}`:"none"}}/>
+              ))}
+            </div>
+            <div title={`${session.name} (@${session.username})`} style={{width:36,height:36,borderRadius:"50%",
+              background:`${C.green}22`,border:`1.5px solid ${C.green}`,display:"flex",alignItems:"center",
+              justifyContent:"center",fontSize:14,fontWeight:800,color:C.greenL}}>
               {session.name[0].toUpperCase()}
             </div>
-            <div style={{fontSize:10,color:C.muted,display:"flex",flexDirection:"column",lineHeight:1.2}}>
-              <span style={{color:C.offW,fontWeight:600}}>{session.name}</span>
-              <span>@{session.username}</span>
-            </div>
-            <button onClick={handleLogout} title="Logout" style={{
-              padding:"4px 8px",background:"transparent",border:`1px solid ${C.border}`,
-              borderRadius:5,color:C.muted,fontSize:10,cursor:"pointer"}}>↩</button>
+            <button onClick={handleLogout} aria-label="Esci" title="Esci" style={{width:44,height:44,
+              background:"transparent",border:`1px solid ${C.border}`,borderRadius:10,color:C.muted,
+              fontSize:16,cursor:"pointer"}}>↩</button>
           </div>
         </div>
-      </div>
+      )}
 
-      {/* PROFILO BAR */}
-      <div style={{background:C.mid,borderBottom:`1px solid ${C.border}`,
-        padding:"5px 20px",display:"flex",alignItems:"center",gap:10,fontSize:11,flexWrap:"wrap"}}>
-        <div style={{width:7,height:7,borderRadius:"50%",background:profile.color}}/>
-        <span style={{color:C.muted}}>Profilo:</span>
-        <span style={{fontWeight:700,color:C.white}}>{profile.name}</span>
-        <span style={{color:C.muted}}>· {profile.drag} BC {profile.BC} · zero {profile.zero}m · H {profile.scopeHeight_cm}cm</span>
-        <span style={{color:C.greenL,fontWeight:700}}>· V0@{s.temp.toFixed(0)}°C: {interpolateV0(profile,s.temp).toFixed(0)} m/s</span>
-        {s.v0meas>100&&<span style={{color:C.amber,fontSize:10}}>· ★ crono {s.v0meas.toFixed(0)} m/s ATTIVO</span>}
-      </div>
+      {/* HEADER — MODULO: indietro + titolo */}
+      {!isHome&&(
+        <div style={{background:C.mid,borderBottom:`1px solid ${C.border}`,padding:"6px 12px",
+          display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:10}}>
+          <button onClick={()=>setTab("Home")} style={{height:44,padding:"0 12px 0 4px",display:"flex",
+            alignItems:"center",gap:2,background:"transparent",border:"none",color:C.greenL,
+            fontSize:15,fontWeight:600,cursor:"pointer"}}>
+            <Icon name="back" size={22}/>Home
+          </button>
+          <div style={{fontSize:16,fontWeight:700,letterSpacing:2,color:C.white,textTransform:"uppercase"}}>{tab}</div>
+          <div style={{display:"flex",alignItems:"center",gap:6,height:28,padding:"0 10px",borderRadius:14,
+            background:C.dark,border:`1px solid ${C.border}`,fontSize:11,fontWeight:600,color:C.offW}}>
+            <span style={{width:6,height:6,borderRadius:"50%",
+              background:connectedDevices.length>0?C.greenL:C.border}}/>
+            BLE {connectedDevices.length}
+          </div>
+        </div>
+      )}
 
+      {/* BARRA PROFILO (solo nei moduli) */}
+      {!isHome&&(
+        <div style={{background:C.mid,borderBottom:`1px solid ${C.border}`,
+          padding:"5px 20px",display:"flex",alignItems:"center",gap:10,fontSize:11,flexWrap:"wrap"}}>
+          <div style={{width:7,height:7,borderRadius:"50%",background:profile.color}}/>
+          <span style={{color:C.muted}}>Profilo:</span>
+          <span style={{fontWeight:700,color:C.white}}>{profile.name}</span>
+          <span style={{color:C.muted}}>· {profile.drag} BC {profile.BC} · zero {profile.zero}m · H {profile.scopeHeight_cm}cm</span>
+          <span style={{color:C.greenL,fontWeight:700}}>· V0@{s.temp.toFixed(0)}°C: {interpolateV0(profile,s.temp).toFixed(0)} m/s</span>
+          {s.v0meas>100&&<span style={{color:C.amber,fontSize:10}}>· ★ crono {s.v0meas.toFixed(0)} m/s ATTIVO</span>}
+        </div>
+      )}
+
+      {isHome              &&<HomeTab s={s} profile={profile} devices={devices} dot={dot}
+                               setTab={setTab} profilesCount={profiles.length}/>}
       {tab==="HUD"         &&<HUDTab s={s} profiles={profiles} activeId={activeId} acquire={acquire}
                                confirmChange={confirmChange} setDist={setDist} startSim={startSim}
                                stopSim={stopSim} setSensor={setSensor}/>}
@@ -2709,8 +2537,10 @@ export default function ZeroDotApp(){
       {tab==="Gara"        &&<GaraTab profile={profile} s={s}/>}
       {tab==="Dispositivi" &&<DispositiviTab devices={devices} setDevices={setDevices}
                                sessionPin={sessionPin} setSessionPin={setSessionPin}/>}
-      {tab==="Stage"       &&<StageTab s={s} devices={devices}/>}
       {tab==="AI"          &&<AITab s={s} profile={profile}/>}
+
+      {showDock&&<AcquireDock s={s} profile={profile} dot={dot} acquire={acquire}
+                               confirmChange={confirmChange} setDist={setDist}/>}
     </div>
   );
 }
